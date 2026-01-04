@@ -1694,6 +1694,138 @@ class Neo4jClient:
             if waf_bypass_rels > 0:
                 print(f"[+] Created {waf_bypass_rels} WAF_BYPASS_VIA relationships")
 
+            # =========================================================================
+            # Process top-level security_checks.findings (new structure)
+            # =========================================================================
+            top_level_security_checks = vuln_scan_data.get("security_checks", {})
+            security_findings = top_level_security_checks.get("findings", [])
+
+            for finding in security_findings:
+                try:
+                    finding_type = finding.get("type", "unknown")
+                    severity = finding.get("severity", "info")
+                    name = finding.get("name", f"Security Issue: {finding_type}")
+                    description = finding.get("description", "")
+                    url = finding.get("url", "")
+                    matched_ip = finding.get("matched_ip")
+                    hostname = finding.get("hostname")
+                    evidence = finding.get("evidence")
+                    status_code = finding.get("status_code")
+                    server = finding.get("server")
+                    recommendation = finding.get("recommendation")
+                    missing_header = finding.get("missing_header")
+                    port = finding.get("port")
+
+                    # Generate unique vulnerability ID
+                    unique_key = f"{finding_type}_{url}_{matched_ip or hostname or ''}"
+                    vuln_id = f"seccheck_{finding_type}_{hash(unique_key) % 100000}"
+
+                    # Create Vulnerability node
+                    vuln_props = {
+                        "id": vuln_id,
+                        "user_id": user_id,
+                        "project_id": project_id,
+                        "source": "security_check",
+                        "type": finding_type,
+                        "severity": severity,
+                        "name": name,
+                        "description": description,
+                        "url": url,
+                        "matched_at": url,
+                        "is_dast_finding": False,
+                    }
+
+                    if matched_ip:
+                        vuln_props["matched_ip"] = matched_ip
+                    if hostname:
+                        vuln_props["hostname"] = hostname
+                    if evidence:
+                        vuln_props["evidence"] = evidence
+                    if status_code:
+                        vuln_props["status_code"] = status_code
+                    if server:
+                        vuln_props["server"] = server
+                    if recommendation:
+                        vuln_props["recommendation"] = recommendation
+                    if missing_header:
+                        vuln_props["missing_header"] = missing_header
+                    if port:
+                        vuln_props["port"] = port
+
+                    vuln_props = {k: v for k, v in vuln_props.items() if v is not None}
+
+                    session.run(
+                        """
+                        MERGE (v:Vulnerability {id: $id})
+                        SET v += $props,
+                            v.updated_at = datetime()
+                        """,
+                        id=vuln_id, props=vuln_props
+                    )
+                    security_checks_created += 1
+                    stats["vulnerabilities_created"] += 1
+
+                    # Create relationships based on finding type
+                    # For IP-related findings (direct_ip_http, direct_ip_https)
+                    if matched_ip:
+                        session.run(
+                            """
+                            MATCH (i:IP {address: $address, project_id: $project_id})
+                            MATCH (v:Vulnerability {id: $vuln_id})
+                            MERGE (i)-[:HAS_VULNERABILITY]->(v)
+                            """,
+                            address=matched_ip, project_id=project_id, vuln_id=vuln_id
+                        )
+                        stats["relationships_created"] += 1
+
+                    # For hostname-related findings (missing headers, etc.)
+                    if hostname:
+                        # Try to link to Subdomain node
+                        result = session.run(
+                            """
+                            MATCH (s:Subdomain {name: $hostname, project_id: $project_id})
+                            MATCH (v:Vulnerability {id: $vuln_id})
+                            MERGE (s)-[:HAS_VULNERABILITY]->(v)
+                            RETURN count(*) as matched
+                            """,
+                            hostname=hostname, project_id=project_id, vuln_id=vuln_id
+                        )
+                        if result.single()["matched"] > 0:
+                            stats["relationships_created"] += 1
+                        else:
+                            # Try Domain node if not a subdomain
+                            session.run(
+                                """
+                                MATCH (d:Domain {name: $hostname, project_id: $project_id})
+                                MATCH (v:Vulnerability {id: $vuln_id})
+                                MERGE (d)-[:HAS_VULNERABILITY]->(v)
+                                """,
+                                hostname=hostname, project_id=project_id, vuln_id=vuln_id
+                            )
+                            stats["relationships_created"] += 1
+
+                    # For BaseURL-related findings
+                    if url and (url.startswith("http://") or url.startswith("https://")):
+                        from urllib.parse import urlparse
+                        parsed = urlparse(url)
+                        base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+                        session.run(
+                            """
+                            MATCH (bu:BaseURL {url: $baseurl, project_id: $project_id})
+                            MATCH (v:Vulnerability {id: $vuln_id})
+                            MERGE (bu)-[:HAS_VULNERABILITY]->(v)
+                            """,
+                            baseurl=base_url, project_id=project_id, vuln_id=vuln_id
+                        )
+                        stats["relationships_created"] += 1
+
+                except Exception as e:
+                    stats["errors"].append(f"Security finding {finding.get('type', 'unknown')} failed: {e}")
+
+            if security_checks_created > 0:
+                print(f"[+] Created {security_checks_created} SecurityCheck Vulnerability nodes")
+
             # Update Domain node with vuln_scan metadata
             metadata = recon_data.get("metadata", {})
             root_domain = metadata.get("root_domain", "")
@@ -1990,6 +2122,254 @@ class Neo4jClient:
             print(f"[+] Created {stats['endpoints_created']} Endpoint nodes")
             print(f"[+] Created {stats['parameters_created']} Parameter nodes")
             print(f"[+] Processed {stats['forms_created']} form endpoints")
+            print(f"[+] Created {stats['relationships_created']} relationships")
+
+            if stats["errors"]:
+                print(f"[!] {len(stats['errors'])} errors occurred")
+
+        return stats
+
+    def update_graph_from_gvm_scan(self, gvm_data: dict, user_id: str, project_id: str) -> dict:
+        """
+        Update the Neo4j graph database with GVM/OpenVAS vulnerability scan data.
+
+        This function creates/updates:
+        - Vulnerability nodes (from GVM findings with source="gvm")
+        - CVE nodes (extracted from GVM findings)
+        - MitreData (CWE) nodes linked to CVEs
+        - Capec nodes linked to CWEs
+        - Relationships: IP -[:HAS_VULNERABILITY]-> Vulnerability
+        - Relationships: Subdomain -[:HAS_VULNERABILITY]-> Vulnerability
+        - Relationships: Vulnerability -[:HAS_CVE]-> CVE
+        - Relationships: CVE -[:HAS_CWE]-> MitreData -[:HAS_CAPEC]-> Capec
+
+        Args:
+            gvm_data: The GVM scan JSON data
+            user_id: User identifier for multi-tenant isolation
+            project_id: Project identifier for multi-tenant isolation
+
+        Returns:
+            Dictionary with statistics about created/updated nodes/relationships
+        """
+        stats = {
+            "vulnerabilities_created": 0,
+            "cves_linked": 0,
+            "ips_linked": 0,
+            "subdomains_linked": 0,
+            "mitre_nodes": 0,
+            "capec_nodes": 0,
+            "relationships_created": 0,
+            "errors": []
+        }
+
+        metadata = gvm_data.get("metadata", {})
+        scans = gvm_data.get("scans", [])
+
+        if not scans:
+            stats["errors"].append("No scans found in GVM data")
+            return stats
+
+        with self.driver.session() as session:
+            # Ensure schema is initialized
+            self._init_schema(session)
+
+            scan_timestamp = metadata.get("scan_timestamp", "")
+            target_domain = metadata.get("target_domain", "")
+
+            # Process each scan
+            for scan in scans:
+                vulnerabilities = scan.get("vulnerabilities", [])
+
+                for vuln in vulnerabilities:
+                    try:
+                        # Skip log-level findings (informational only)
+                        severity_class = vuln.get("severity_class", "log")
+                        if severity_class == "log":
+                            continue
+
+                        # Extract data from vulnerability
+                        nvt = vuln.get("nvt", {})
+                        host_data = vuln.get("host", {})
+                        qod_data = vuln.get("qod", {})
+
+                        # Get target IP and hostname
+                        target_ip = host_data.get("#text", "")
+                        target_hostname = host_data.get("hostname", "")
+
+                        # Parse port info (format: "80/tcp" or "general/tcp")
+                        port_str = vuln.get("port", "")
+                        target_port = None
+                        port_protocol = None
+                        if "/" in port_str:
+                            port_part, protocol_part = port_str.split("/", 1)
+                            if port_part.isdigit():
+                                target_port = int(port_part)
+                            port_protocol = protocol_part
+
+                        # Get OID for unique identification
+                        oid = nvt.get("@oid", "")
+
+                        # Generate unique vulnerability ID
+                        vuln_id = f"gvm-{oid}-{target_ip}-{target_port or 'general'}"
+
+                        # Extract severity info
+                        severities = nvt.get("severities", {})
+                        severity_info = severities.get("severity", {})
+                        cvss_vector = severity_info.get("value", "")
+                        cvss_score = vuln.get("severity_float", 0.0)
+
+                        # Extract solution info
+                        solution_data = nvt.get("solution", {})
+                        solution_text = solution_data.get("#text", "") if isinstance(solution_data, dict) else ""
+                        solution_type = solution_data.get("@type", "") if isinstance(solution_data, dict) else ""
+
+                        # Extract CVE IDs from refs
+                        cve_ids = vuln.get("cves_extracted", [])
+                        refs = nvt.get("refs", {})
+                        if refs:
+                            ref_list = refs.get("ref", [])
+                            if isinstance(ref_list, dict):
+                                ref_list = [ref_list]
+                            for ref in ref_list:
+                                if ref.get("@type") == "cve":
+                                    cve_id = ref.get("@id", "")
+                                    if cve_id and cve_id not in cve_ids:
+                                        cve_ids.append(cve_id)
+
+                        # Create Vulnerability node
+                        vuln_props = {
+                            "id": vuln_id,
+                            "user_id": user_id,
+                            "project_id": project_id,
+                            "oid": oid,
+                            "name": nvt.get("name", vuln.get("name", "")),
+                            "severity": severity_class,
+                            "cvss_score": cvss_score,
+                            "cvss_vector": cvss_vector,
+                            "threat": vuln.get("threat", ""),
+                            "description": vuln.get("description", ""),
+                            "solution": solution_text,
+                            "solution_type": solution_type,
+                            "target_ip": target_ip,
+                            "target_port": target_port,
+                            "target_hostname": target_hostname,
+                            "port_protocol": port_protocol,
+                            "family": nvt.get("family", ""),
+                            "qod": int(qod_data.get("value", 0)) if qod_data.get("value") else 0,
+                            "qod_type": qod_data.get("type"),
+                            "cve_ids": cve_ids,
+                            "source": "gvm",
+                            "scanner": "OpenVAS",
+                            "scan_timestamp": scan_timestamp,
+                        }
+
+                        # Remove None values
+                        vuln_props = {k: v for k, v in vuln_props.items() if v is not None}
+
+                        session.run(
+                            """
+                            MERGE (v:Vulnerability {id: $id})
+                            SET v += $props,
+                                v.updated_at = datetime()
+                            """,
+                            id=vuln_id, props=vuln_props
+                        )
+                        stats["vulnerabilities_created"] += 1
+
+                        # Link to IP node
+                        if target_ip:
+                            result = session.run(
+                                """
+                                MATCH (i:IP {address: $ip, user_id: $user_id, project_id: $project_id})
+                                MATCH (v:Vulnerability {id: $vuln_id})
+                                MERGE (i)-[:HAS_VULNERABILITY]->(v)
+                                RETURN i
+                                """,
+                                ip=target_ip, user_id=user_id, project_id=project_id, vuln_id=vuln_id
+                            )
+                            if result.single():
+                                stats["ips_linked"] += 1
+                                stats["relationships_created"] += 1
+
+                        # Link to Subdomain node (if hostname matches a subdomain)
+                        if target_hostname:
+                            result = session.run(
+                                """
+                                MATCH (s:Subdomain {name: $hostname, user_id: $user_id, project_id: $project_id})
+                                MATCH (v:Vulnerability {id: $vuln_id})
+                                MERGE (s)-[:HAS_VULNERABILITY]->(v)
+                                RETURN s
+                                """,
+                                hostname=target_hostname, user_id=user_id, project_id=project_id, vuln_id=vuln_id
+                            )
+                            if result.single():
+                                stats["subdomains_linked"] += 1
+                                stats["relationships_created"] += 1
+
+                        # Process CVEs and create CVE -> CWE -> CAPEC chain
+                        for cve_id in cve_ids:
+                            try:
+                                # MERGE CVE node (reuse if already exists from technology_cves)
+                                session.run(
+                                    """
+                                    MERGE (c:CVE {id: $cve_id})
+                                    ON CREATE SET c.user_id = $user_id,
+                                                  c.project_id = $project_id,
+                                                  c.source = 'gvm',
+                                                  c.created_at = datetime()
+                                    SET c.updated_at = datetime()
+                                    """,
+                                    cve_id=cve_id, user_id=user_id, project_id=project_id
+                                )
+
+                                # Create relationship: Vulnerability -[:HAS_CVE]-> CVE
+                                session.run(
+                                    """
+                                    MATCH (v:Vulnerability {id: $vuln_id})
+                                    MATCH (c:CVE {id: $cve_id})
+                                    MERGE (v)-[:HAS_CVE]->(c)
+                                    """,
+                                    vuln_id=vuln_id, cve_id=cve_id
+                                )
+                                stats["cves_linked"] += 1
+                                stats["relationships_created"] += 1
+
+                            except Exception as e:
+                                stats["errors"].append(f"CVE {cve_id} processing failed: {e}")
+
+                    except Exception as e:
+                        stats["errors"].append(f"Vulnerability processing failed: {e}")
+
+            # Update Domain node with GVM scan metadata
+            if target_domain:
+                try:
+                    summary = gvm_data.get("summary", {})
+                    session.run(
+                        """
+                        MATCH (d:Domain {name: $root_domain, user_id: $user_id, project_id: $project_id})
+                        SET d.gvm_scan_timestamp = $scan_timestamp,
+                            d.gvm_total_vulnerabilities = $total_vulns,
+                            d.gvm_critical = $critical,
+                            d.gvm_high = $high,
+                            d.gvm_medium = $medium,
+                            d.gvm_low = $low,
+                            d.updated_at = datetime()
+                        """,
+                        root_domain=target_domain, user_id=user_id, project_id=project_id,
+                        scan_timestamp=scan_timestamp,
+                        total_vulns=summary.get("total_vulnerabilities", 0),
+                        critical=summary.get("critical", 0),
+                        high=summary.get("high", 0),
+                        medium=summary.get("medium", 0),
+                        low=summary.get("low", 0)
+                    )
+                except Exception as e:
+                    stats["errors"].append(f"Domain update failed: {e}")
+
+            print(f"[+] Created {stats['vulnerabilities_created']} GVM Vulnerability nodes")
+            print(f"[+] Linked {stats['cves_linked']} CVEs")
+            print(f"[+] Linked {stats['ips_linked']} IPs")
+            print(f"[+] Linked {stats['subdomains_linked']} Subdomains")
             print(f"[+] Created {stats['relationships_created']} relationships")
 
             if stats["errors"]:

@@ -38,7 +38,9 @@ from params import (
     GVM_SCAN_CONFIG,
     GVM_TASK_TIMEOUT,
     GVM_POLL_INTERVAL,
-    GVM_CLEANUP_AFTER_SCAN
+    GVM_CLEANUP_AFTER_SCAN,
+    USER_ID,
+    PROJECT_ID,
 )
 
 # GVM imports (handled gracefully if not installed)
@@ -758,8 +760,8 @@ def extract_targets_from_recon(recon_data: Dict) -> Tuple[Set[str], Set[str]]:
     if not dns_data:
         return ips, hostnames
     
-    # Main domain
-    domain = recon_data.get("metadata", {}).get("target_domain", "")
+    # Main domain (use root_domain from recon metadata)
+    domain = recon_data.get("metadata", {}).get("root_domain", "") or recon_data.get("domain", "")
     if domain:
         hostnames.add(domain)
     
@@ -828,11 +830,62 @@ def save_vuln_results(
         output_dir = PROJECT_ROOT / "gvm_scan" / "output"
     
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"vuln_{domain}.json"
+    output_file = output_dir / f"gvm_{domain}.json"
     
     with open(output_file, 'w') as f:
         json.dump(results, f, indent=2)
-    
+
     print(f"[+] Results saved to: {output_file}")
     return output_file
+
+
+def update_graph_from_gvm_results(
+    gvm_data: Dict,
+    user_id: str = None,
+    project_id: str = None
+) -> Dict:
+    """
+    Update Neo4j graph database with GVM scan results.
+
+    This function creates/updates:
+    - Vulnerability nodes (from GVM findings with source="gvm")
+    - Links to existing IP and Subdomain nodes
+    - CVE nodes extracted from GVM findings
+    - CVE -> CWE -> CAPEC enrichment chain
+
+    Args:
+        gvm_data: GVM scan results dictionary
+        user_id: User identifier (defaults to USER_ID from params)
+        project_id: Project identifier (defaults to PROJECT_ID from params)
+
+    Returns:
+        Dictionary with statistics about created/updated nodes
+    """
+    from graph_db import Neo4jClient
+
+    user_id = user_id or USER_ID
+    project_id = project_id or PROJECT_ID
+
+    print("\n" + "=" * 50)
+    print("[*] Updating Neo4j graph with GVM results...")
+    print("=" * 50)
+
+    try:
+        with Neo4jClient() as client:
+            if not client.verify_connection():
+                print("[!] Failed to connect to Neo4j")
+                return {"error": "Neo4j connection failed"}
+
+            stats = client.update_graph_from_gvm_scan(
+                gvm_data=gvm_data,
+                user_id=user_id,
+                project_id=project_id
+            )
+
+            print("[+] Graph update completed successfully")
+            return stats
+
+    except Exception as e:
+        print(f"[!] Graph update failed: {e}")
+        return {"error": str(e)}
 

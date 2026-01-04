@@ -20,10 +20,10 @@ load_dotenv(Path(__file__).parent / ".env")
 #   TARGET_DOMAIN = "vulnweb.com", SUBDOMAIN_LIST = ["testphp."] → Only scan testphp.vulnweb.com
 #   TARGET_DOMAIN = "example.com", SUBDOMAIN_LIST = ["dev.", "staging."] → Only scan dev.example.com and staging.example.com
 #
-TARGET_DOMAIN = "devergolabs.com"
-SUBDOMAIN_LIST = []  # Empty = discover all, or specify prefixes like ["www.", "api."]
+TARGET_DOMAIN = "vulnweb.com"
+SUBDOMAIN_LIST = ["testphp."]  # Empty = discover all, or specify prefixes like ["www.", "api."]
 USER_ID = "samgiam"
-PROJECT_ID = "project_testphp.vulnweb.com"
+PROJECT_ID = "project_testphp.vulnweb.com_2"
 
 # =============================================================================
 # SCAN MODULES - Control which modules to run
@@ -620,6 +620,12 @@ CVE_LOOKUP_MIN_CVSS = 0.0
 # Vulners API key (optional - for better results with vulners source)
 # Get free API key at: https://vulners.com/
 VULNERS_API_KEY = ""
+
+# NVD API key (optional but STRONGLY RECOMMENDED, for lookup_cves_nvd in vuln_scan)
+# Without an API key, NVD enforces aggressive rate limiting (6 requests/minute)
+# With an API key, you get 50 requests/10 seconds
+# Get free API key at: https://nvd.nist.gov/developers/request-an-api-key
+NVD_API_KEY = os.getenv("NVD_API_KEY", "")
 
 
 # =============================================================================

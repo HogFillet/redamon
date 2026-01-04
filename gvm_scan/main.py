@@ -38,6 +38,7 @@ from gvm_scan.gvm_scanner import (
     extract_targets_from_recon,
     load_recon_file,
     save_vuln_results,
+    update_graph_from_gvm_results,
     GVM_AVAILABLE,
 )
 
@@ -78,12 +79,17 @@ def run_vulnerability_scan(
         return {"error": "python-gvm not installed"}
 
     # Get targets based on USE_RECON_FOR_TARGET setting
+    root_domain = domain  # Default to input domain
+
     if USE_RECON_FOR_TARGET:
         # Load recon data
         print("[*] Loading recon data...")
         try:
             recon_data = load_recon_file(domain)
+            # Get root_domain from recon metadata (consistent with recon/main.py)
+            root_domain = recon_data.get("metadata", {}).get("root_domain", domain)
             print(f"    [+] Loaded: recon_{domain}.json")
+            print(f"    [+] Root domain: {root_domain}")
         except FileNotFoundError as e:
             print(f"[!] ERROR: {e}")
             print(f"[!] Run domain recon first: python recon/main.py")
@@ -101,24 +107,24 @@ def run_vulnerability_scan(
 
     print(f"    [+] Found {len(ips)} unique IPs")
     print(f"    [+] Found {len(hostnames)} unique hostnames")
-    
+
     if not ips and not hostnames:
         if USE_RECON_FOR_TARGET:
             print("[!] No targets found in recon data")
         else:
             print("[!] No targets specified in GVM_IP_LIST or GVM_HOSTNAME_LIST")
         return {"error": "No targets found"}
-    
-    # Initialize results structure
+
+    # Initialize results structure (use root_domain from recon metadata)
     results = {
         "metadata": {
             "scan_type": "vulnerability_scan",
             "scan_timestamp": datetime.now().isoformat(),
-            "target_domain": domain,
+            "target_domain": root_domain,
             "scan_strategy": scan_targets,
             "use_recon_for_target": USE_RECON_FOR_TARGET,
             "target_source": "recon_data" if USE_RECON_FOR_TARGET else "manual_lists",
-            "recon_file": f"recon_{domain}.json" if USE_RECON_FOR_TARGET else None,
+            "recon_file": f"recon_{root_domain}.json" if USE_RECON_FOR_TARGET else None,
             "targets": {
                 "ips": list(ips),
                 "hostnames": list(hostnames)
@@ -148,7 +154,7 @@ def run_vulnerability_scan(
         return {"error": "Failed to connect to GVM"}
     
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_file = OUTPUT_DIR / f"vuln_{domain}.json"
+    output_file = OUTPUT_DIR / f"gvm_{root_domain}.json"
     
     def save_incremental():
         """Save current results incrementally."""
@@ -228,7 +234,7 @@ def run_vulnerability_scan(
     summary = results["summary"]
     print(f"\n{'=' * 70}")
     print(f"[+] VULNERABILITY SCAN COMPLETE")
-    print(f"[+] Domain: {domain}")
+    print(f"[+] Domain: {root_domain}")
     print(f"[+] Total vulnerabilities: {summary['total_vulnerabilities']}")
     print(f"    • Critical: {summary['critical']}")
     print(f"    • High: {summary['high']}")
@@ -238,7 +244,12 @@ def run_vulnerability_scan(
     print(f"[+] Hosts scanned: {summary['hosts_scanned']}")
     print(f"[+] Output: {output_file}")
     print(f"{'=' * 70}")
-    
+
+    # Update Neo4j graph with GVM results
+    graph_stats = update_graph_from_gvm_results(results)
+    if "error" not in graph_stats:
+        results["graph_update"] = graph_stats
+
     return results
 
 

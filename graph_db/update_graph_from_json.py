@@ -2,7 +2,7 @@
 """
 RedAmon - Graph Database Update Script
 =======================================
-Standalone script to update Neo4j graph database from recon JSON files.
+Standalone script to update Neo4j graph database from recon and GVM JSON files.
 
 This script allows you to run graph updates independently from the main pipeline,
 useful for:
@@ -17,7 +17,7 @@ Usage:
 
 Configuration:
     Edit the UPDATE_MODULES list below to select which updates to run.
-    By default, all update functions are enabled.
+    By default, all update functions are enabled (including gvm_scan).
 """
 
 import sys
@@ -40,13 +40,18 @@ from graph_db import Neo4jClient
 #   - "domain_discovery" : Updates Domain, Subdomain, IP, DNSRecord nodes
 #   - "port_scan"        : Updates Port, Service nodes
 #   - "http_probe"       : Updates BaseURL, Technology, Header nodes
-#   - "vuln_scan"        : Updates Endpoint, Parameter, Vulnerability nodes
+#   - "resource_enum"    : Updates Endpoint, Parameter, Form nodes (from Katana crawl)
+#   - "vuln_scan"        : Updates Vulnerability, CVE, MitreData, Capec nodes (Nuclei DAST)
+#   - "gvm_scan"         : Updates Vulnerability, CVE nodes (GVM/OpenVAS infrastructure scan)
 #
 # Set to list of modules to run, or empty list [] to run ALL modules
-UPDATE_MODULES = []  # Empty = run all, or specify: ["domain_discovery", "port_scan", "http_probe", "vuln_scan"]
+UPDATE_MODULES = []  # Empty = run all, or specify: ["domain_discovery", "port_scan", "http_probe", "resource_enum", "vuln_scan", "gvm_scan"]
 
 # Path to recon JSON file (None = auto-detect from TARGET_DOMAIN)
 RECON_JSON_PATH = None  # Example: "/path/to/recon_vulnweb.com.json"
+
+# Path to GVM JSON file (None = auto-detect from TARGET_DOMAIN)
+GVM_JSON_PATH = None  # Example: "/path/to/gvm_vulnweb.com.json"
 
 # Override user/project IDs (None = use from params.py)
 OVERRIDE_USER_ID = None
@@ -61,11 +66,13 @@ UPDATE_FUNCTION_MAP = {
     "domain_discovery": "update_graph_from_domain_discovery",
     "port_scan": "update_graph_from_port_scan",
     "http_probe": "update_graph_from_http_probe",
+    "resource_enum": "update_graph_from_resource_enum",
     "vuln_scan": "update_graph_from_vuln_scan",
+    "gvm_scan": "update_graph_from_gvm_scan",
 }
 
-# Ordered execution (dependencies: domain_discovery should run first)
-UPDATE_ORDER = ["domain_discovery", "port_scan", "http_probe", "vuln_scan"]
+# Ordered execution (dependencies: domain_discovery should run first, gvm_scan last)
+UPDATE_ORDER = ["domain_discovery", "port_scan", "http_probe", "resource_enum", "vuln_scan", "gvm_scan"]
 
 
 def load_recon_json(json_path: Path) -> dict:
@@ -78,18 +85,42 @@ def load_recon_json(json_path: Path) -> dict:
 
 
 def get_recon_file_path(target_domain: str) -> Path:
-    """Get the path to the recon JSON file for a target domain."""
-    import tldextract
-    extracted = tldextract.extract(target_domain)
-    root_domain = f"{extracted.domain}.{extracted.suffix}"
-    return PROJECT_ROOT / "recon" / "output" / f"recon_{root_domain}.json"
+    """Get the path to the recon JSON file for a target domain.
+
+    Args:
+        target_domain: Root domain (e.g., "vulnweb.com")
+                      TARGET_DOMAIN in params.py must always be a root domain.
+    """
+    # TARGET_DOMAIN is always the root domain
+    return PROJECT_ROOT / "recon" / "output" / f"recon_{target_domain}.json"
+
+
+def get_gvm_file_path(target_domain: str) -> Path:
+    """Get the path to the GVM JSON file for a target domain.
+
+    Args:
+        target_domain: Root domain (e.g., "vulnweb.com")
+                      TARGET_DOMAIN in params.py must always be a root domain.
+    """
+    # TARGET_DOMAIN is always the root domain
+    return PROJECT_ROOT / "gvm_scan" / "output" / f"gvm_{target_domain}.json"
+
+
+def load_gvm_json(json_path: Path) -> dict:
+    """Load GVM scan JSON file."""
+    if not json_path.exists():
+        return None  # GVM scan is optional
+
+    with open(json_path, 'r') as f:
+        return json.load(f)
 
 
 def run_graph_updates(
     recon_data: dict,
     user_id: str,
     project_id: str,
-    modules: list = None
+    modules: list = None,
+    gvm_data: dict = None
 ) -> dict:
     """
     Run graph database updates for specified modules.
@@ -99,6 +130,7 @@ def run_graph_updates(
         user_id: User identifier for multi-tenant isolation
         project_id: Project identifier for multi-tenant isolation
         modules: List of modules to update, or None/[] for all modules
+        gvm_data: The GVM scan JSON data (optional, for gvm_scan module)
 
     Returns:
         Dictionary with stats for each module
@@ -126,7 +158,7 @@ def run_graph_updates(
     print(f"  Modules to run: {', '.join(modules_to_run)}")
     print("=" * 70 + "\n")
 
-    # Check what data is available in the JSON
+    # Check what data is available in the JSON files
     available_data = []
     if recon_data.get("dns") or recon_data.get("subdomains"):
         available_data.append("domain_discovery")
@@ -134,10 +166,14 @@ def run_graph_updates(
         available_data.append("port_scan")
     if recon_data.get("http_probe"):
         available_data.append("http_probe")
+    if recon_data.get("resource_enum"):
+        available_data.append("resource_enum")
     if recon_data.get("vuln_scan"):
         available_data.append("vuln_scan")
+    if gvm_data and gvm_data.get("scans"):
+        available_data.append("gvm_scan")
 
-    print(f"[*] Data available in JSON: {', '.join(available_data) if available_data else 'None'}")
+    print(f"[*] Data available: {', '.join(available_data) if available_data else 'None'}")
     print()
 
     # Connect to Neo4j and run updates
@@ -171,7 +207,11 @@ def run_graph_updates(
                 print("-" * 40)
 
                 try:
-                    stats = update_func(recon_data, user_id, project_id)
+                    # GVM scan uses separate gvm_data instead of recon_data
+                    if module == "gvm_scan":
+                        stats = update_func(gvm_data, user_id, project_id)
+                    else:
+                        stats = update_func(recon_data, user_id, project_id)
                     results["modules"][module] = {
                         "success": True,
                         "stats": stats
@@ -241,7 +281,7 @@ def main():
     user_id = OVERRIDE_USER_ID or USER_ID
     project_id = OVERRIDE_PROJECT_ID or PROJECT_ID
 
-    # Determine JSON file path
+    # Determine recon JSON file path
     if RECON_JSON_PATH:
         json_path = Path(RECON_JSON_PATH)
     else:
@@ -251,7 +291,7 @@ def main():
 
     try:
         recon_data = load_recon_json(json_path)
-        print(f"[+] Loaded JSON successfully")
+        print(f"[+] Loaded recon JSON successfully")
 
         # Show metadata
         metadata = recon_data.get("metadata", {})
@@ -267,11 +307,35 @@ def main():
         print(f"[!] Error parsing JSON: {e}")
         return 1
 
+    # Load GVM JSON file (optional)
+    if GVM_JSON_PATH:
+        gvm_path = Path(GVM_JSON_PATH)
+    else:
+        gvm_path = get_gvm_file_path(TARGET_DOMAIN)
+
+    gvm_data = None
+    if gvm_path.exists():
+        print(f"[*] Loading GVM data from: {gvm_path}")
+        try:
+            gvm_data = load_gvm_json(gvm_path)
+            if gvm_data:
+                gvm_metadata = gvm_data.get("metadata", {})
+                print(f"[+] Loaded GVM JSON successfully")
+                print(f"[*] GVM scan timestamp: {gvm_metadata.get('scan_timestamp', 'unknown')}")
+                scan_count = len(gvm_data.get("scans", []))
+                print(f"[*] GVM scans: {scan_count}")
+        except json.JSONDecodeError as e:
+            print(f"[!] Error parsing GVM JSON: {e}")
+            gvm_data = None
+    else:
+        print(f"[*] No GVM data found at: {gvm_path} (optional)")
+
     # Run updates
     results = run_graph_updates(
         recon_data=recon_data,
         user_id=user_id,
         project_id=project_id,
+        gvm_data=gvm_data,
         modules=UPDATE_MODULES if UPDATE_MODULES else None
     )
 

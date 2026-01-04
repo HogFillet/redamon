@@ -22,7 +22,6 @@ import sys
 import json
 from pathlib import Path
 from datetime import datetime
-import tldextract
 
 # Add project root to path for imports
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -61,19 +60,20 @@ def parse_target(target: str, subdomain_list: list = None) -> dict:
 
     Args:
         target: Root domain (e.g., "example.com", "vulnweb.com")
+                TARGET_DOMAIN in params.py must always be a root domain.
         subdomain_list: List of subdomain prefixes to filter (e.g., ["testphp.", "www."])
                        Empty list = full discovery mode (scan all subdomains)
 
     Returns:
         Dictionary with:
         - target: original target (root domain)
-        - root_domain: the root domain (e.g., "example.com")
+        - root_domain: the root domain (same as target)
         - filtered_mode: True if SUBDOMAIN_LIST has entries (filtered scan)
         - subdomain_list: list of subdomain prefixes to scan
         - full_subdomains: list of full subdomain names (prefix + root domain)
     """
-    extracted = tldextract.extract(target)
-    root_domain = f"{extracted.domain}.{extracted.suffix}"
+    # TARGET_DOMAIN is always the root domain (e.g., "vulnweb.com")
+    root_domain = target
 
     # Determine if we're in filtered mode (SUBDOMAIN_LIST has entries)
     subdomain_list = subdomain_list or []

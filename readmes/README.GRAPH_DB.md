@@ -158,6 +158,7 @@ UPDATE_MODULES = ["domain_discovery", "port_scan", "http_probe", "vuln_scan"]
 | `port_scan` | Port, Service | HAS_PORT, RUNS_SERVICE |
 | `http_probe` | BaseURL, Technology, Header | SERVES_URL, USES_TECHNOLOGY, HAS_HEADER |
 | `vuln_scan` | Endpoint, Parameter, Vulnerability | HAS_ENDPOINT, HAS_PARAMETER, HAS_VULNERABILITY, FOUND_AT, AFFECTS_PARAMETER |
+| `gvm_scan` | Vulnerability, CVE | HAS_VULNERABILITY (from IP/Subdomain), HAS_CVE |
 
 ### Use Cases
 
@@ -202,8 +203,9 @@ The `:Vulnerability` node stores all security findings from multiple sources:
 
 | Source | Description | Connected To |
 |--------|-------------|--------------|
-| `nuclei` | Nuclei scanner findings | `:BaseURL`, `:Endpoint`, `:Parameter` |
+| `nuclei` | Nuclei scanner findings (DAST) | `:BaseURL`, `:Endpoint`, `:Parameter` |
 | `security_check` | Custom security checks | `:IP`, `:Subdomain` |
+| `gvm` | GVM/OpenVAS infrastructure scan | `:IP`, `:Subdomain`, `:CVE` |
 
 **Security Check Types:**
 
@@ -252,6 +254,115 @@ WHERE v.severity IN ["high", "critical"]
 RETURN v.source, v.type, v.name, v.url
 ORDER BY v.severity DESC
 ```
+
+## GVM/OpenVAS Vulnerability Integration
+
+The `gvm_scan` module imports vulnerability findings from GVM/OpenVAS infrastructure scans into the graph.
+
+### GVM Vulnerability Node Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `id` | string | Unique ID: `gvm-{oid}-{target_ip}-{port}` |
+| `oid` | string | GVM OID (e.g., `1.3.6.1.4.1.25623.1.0.117318`) |
+| `name` | string | Vulnerability name |
+| `severity` | string | `low`, `medium`, `high`, `critical` |
+| `cvss_score` | float | CVSS score (e.g., 4.3) |
+| `cvss_vector` | string | CVSS vector string |
+| `threat` | string | GVM threat level |
+| `description` | string | Detailed description |
+| `solution` | string | Remediation advice |
+| `solution_type` | string | Solution type (e.g., `Mitigation`) |
+| `target_ip` | string | Affected IP address |
+| `target_port` | integer | Affected port |
+| `target_hostname` | string | Affected hostname |
+| `family` | string | Vulnerability family (e.g., `SSL and TLS`) |
+| `qod` | integer | Quality of Detection (0-100%) |
+| `cve_ids` | array | List of related CVE IDs |
+| `source` | string | Always `gvm` |
+| `scanner` | string | Always `OpenVAS` |
+| `scan_timestamp` | string | When the scan was performed |
+
+### GVM Relationships
+
+```cypher
+-- GVM vulnerabilities linked to IP
+(:IP)-[:HAS_VULNERABILITY]->(:Vulnerability {source: "gvm"})
+
+-- GVM vulnerabilities linked to Subdomain (if hostname matches)
+(:Subdomain)-[:HAS_VULNERABILITY]->(:Vulnerability {source: "gvm"})
+
+-- GVM vulnerability to CVE enrichment
+(:Vulnerability {source: "gvm"})-[:HAS_CVE]->(:CVE)
+
+-- CVE to CWE/CAPEC chain (shared with technology_cves)
+(:CVE)-[:HAS_CWE]->(:MitreData)-[:HAS_CAPEC]->(:Capec)
+```
+
+### GVM Graph Visualization
+
+```
+     IP / Subdomain
+           |
+     HAS_VULNERABILITY
+           |
+           v
+    ┌─────────────────┐
+    │  Vulnerability  │  (source: "gvm")
+    │  OID, severity  │
+    └────────┬────────┘
+             │ HAS_CVE
+    ┌────────▼────────┐
+    │      CVE        │  (shared with technology_cves)
+    │ CVE-2011-3389   │
+    └────────┬────────┘
+             │ HAS_CWE
+    ┌────────▼────────┐
+    │    MitreData    │
+    │    CWE-327      │
+    └────────┬────────┘
+             │ HAS_CAPEC
+    ┌────────▼────────┐
+    │     Capec       │
+    │   CAPEC-217     │
+    └─────────────────┘
+```
+
+### GVM Query Examples
+
+```cypher
+-- Find all GVM vulnerabilities
+MATCH (v:Vulnerability {source: "gvm"})
+RETURN v.name, v.severity, v.target_ip, v.target_port
+ORDER BY v.cvss_score DESC
+
+-- Find GVM vulnerabilities with CVE enrichment
+MATCH (v:Vulnerability {source: "gvm"})-[:HAS_CVE]->(c:CVE)
+RETURN v.name, v.severity, collect(c.id) AS cves
+
+-- Find all vulnerabilities affecting an IP (any source)
+MATCH (i:IP {address: "44.228.249.3"})-[:HAS_VULNERABILITY]->(v:Vulnerability)
+RETURN v.source, v.name, v.severity
+
+-- Find GVM vulnerabilities with full MITRE chain
+MATCH (v:Vulnerability {source: "gvm"})-[:HAS_CVE]->(c:CVE)-[:HAS_CWE]->(cwe:MitreData)-[:HAS_CAPEC]->(cap:Capec)
+RETURN v.name, c.id AS cve, cwe.cwe_id AS cwe, cap.capec_id AS capec
+
+-- Count vulnerabilities by source
+MATCH (v:Vulnerability)
+RETURN v.source, count(v) AS count,
+       collect(DISTINCT v.severity) AS severities
+ORDER BY count DESC
+```
+
+### GVM Data File
+
+GVM scan results are stored in:
+```
+gvm_scan/output/gvm_{target_domain}.json
+```
+
+The script `update_graph_from_json.py` automatically loads this file when running the `gvm_scan` module.
 
 ## Troubleshooting
 

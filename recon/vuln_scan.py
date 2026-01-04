@@ -958,25 +958,34 @@ def lookup_cves_nvd(product: str, version: str = None, max_results: int = 20) ->
     cves = []
     product_normalized = normalize_product_name(product)
     cpe_info = CPE_MAPPINGS.get(product_normalized)
-    
+
     params = {"resultsPerPage": max_results}
-    
+    headers = {}
+
+    # Add API key if available (reduces rate limiting)
+    try:
+        from params import NVD_API_KEY
+        if NVD_API_KEY:
+            headers["apiKey"] = NVD_API_KEY
+    except ImportError:
+        pass  # NVD_API_KEY not configured
+
     if cpe_info and version:
         vendor, prod = cpe_info
-        # Use virtualMatchString for better version matching
-        params["virtualMatchString"] = f"cpe:2.3:a:{vendor}:{prod}:{version}:*:*:*:*:*:*:*"
+        # Use cpeName parameter (more reliable than virtualMatchString which NVD blocks)
+        params["cpeName"] = f"cpe:2.3:a:{vendor}:{prod}:{version}:*:*:*:*:*:*:*"
     elif cpe_info:
         vendor, prod = cpe_info
-        params["virtualMatchString"] = f"cpe:2.3:a:{vendor}:{prod}:*:*:*:*:*:*:*:*"
+        params["cpeName"] = f"cpe:2.3:a:{vendor}:{prod}:*:*:*:*:*:*:*:*"
     else:
         # Fallback to keyword search for unknown products
         keyword = product
         if version:
             keyword += f" {version}"
         params["keywordSearch"] = keyword
-    
+
     try:
-        response = requests.get(NVD_API_URL, params=params, timeout=30)
+        response = requests.get(NVD_API_URL, params=params, headers=headers, timeout=30)
         response.raise_for_status()
         data = response.json()
         
@@ -1394,13 +1403,12 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None) -> dict:
                 "unknown": 0,
             },
             "vulnerabilities": {
-                "total": 0,
-                "critical": [],
-                "high": [],
-                "medium": [],
-                "low": [],
-                "info": [],
-                "unknown": [],
+                "critical": 0,
+                "high": 0,
+                "medium": 0,
+                "low": 0,
+                "info": 0,
+                "unknown": 0,
             },
             "all_cves": [],
             "by_category": {},
@@ -1444,9 +1452,9 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None) -> dict:
             }
             
             if severity in nuclei_results["vulnerabilities"]:
-                nuclei_results["vulnerabilities"][severity].append(finding_summary)
+                nuclei_results["vulnerabilities"][severity] += 1
             else:
-                nuclei_results["vulnerabilities"]["unknown"].append(finding_summary)
+                nuclei_results["vulnerabilities"]["unknown"] += 1
             
             # Collect CVEs
             all_cves.extend(finding["cves"])
@@ -1477,14 +1485,6 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None) -> dict:
                 unique_cves.append(cve)
         unique_cves.sort(key=lambda x: x.get("cvss") or 0, reverse=True)
         nuclei_results["all_cves"] = unique_cves
-        
-        # Calculate total vulnerabilities (excluding info)
-        nuclei_results["vulnerabilities"]["total"] = (
-            nuclei_results["summary"]["critical"] +
-            nuclei_results["summary"]["high"] +
-            nuclei_results["summary"]["medium"] +
-            nuclei_results["summary"]["low"]
-        )
         
         # Add to recon data
         recon_data["vuln_scan"] = nuclei_results

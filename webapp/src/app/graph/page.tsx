@@ -43,9 +43,9 @@ const NODE_COLORS: Record<string, string> = {
   Host: '#f59e0b',
   Port: '#38bdf8',  // Sky blue
   Service: '#0891b2',  // Darker cyan/teal
-  Vulnerability: '#dc2626',
+  Vulnerability: '#ff3333',  // Brilliant red (critical severity shown in legend)
   Technology: '#84cc16',
-  CVE: '#e11d48',        // Rose/Red - Known CVEs from technology lookup
+  CVE: '#ff3377',        // Magenta-red (critical severity shown in legend)
   MitreData: '#0ea5e9',  // Sky blue - CWE weakness data
   Capec: '#f97316',      // Orange - Attack patterns
   Certificate: '#fb923c',
@@ -59,6 +59,38 @@ const NODE_COLORS: Record<string, string> = {
   Header: '#f472b6',
   Project: '#fbbf24',
   Default: '#6b7280',
+}
+
+// Severity-based size multipliers
+const SEVERITY_SIZE_MULTIPLIERS: Record<string, number> = {
+  critical: 1.0,
+  high: 1.0,
+  medium: 1.0,
+  low: 0.7,
+  info: 0.7,
+  unknown: 0.7,
+}
+
+// Severity-based colors for Vulnerability nodes (pure red tonality, darker = lower severity)
+// 3 tonality levels: critical (brightest), high/medium (mid), low/info (darkest)
+const SEVERITY_COLORS_VULN: Record<string, string> = {
+  critical: '#ff3333',  // Brilliant red - brightest, vivid
+  high: '#b91c1c',      // Medium red (red-700) - mid tonality
+  medium: '#b91c1c',    // Medium red (red-700) - mid tonality
+  low: '#7f1d1d',       // Dark red (red-900) - darkest
+  info: '#7f1d1d',      // Dark red (red-900) - darkest
+  unknown: '#6b7280',   // Grey for unknown
+}
+
+// Severity-based colors for CVE nodes (red-purple/magenta tonality)
+// 3 tonality levels: critical (brightest), high/medium (mid), low/info (darkest)
+const SEVERITY_COLORS_CVE: Record<string, string> = {
+  critical: '#ff3377',  // Brilliant magenta-red - brightest, vivid
+  high: '#be185d',      // Medium pink-red (pink-700) - mid tonality
+  medium: '#be185d',    // Medium pink-red (pink-700) - mid tonality
+  low: '#831843',       // Dark pink-red (pink-900) - darkest
+  info: '#831843',      // Dark pink-red (pink-900) - darkest
+  unknown: '#6b7280',   // Grey for unknown
 }
 
 // Node size multipliers (1x = default size)
@@ -82,14 +114,25 @@ async function fetchGraphData(projectId: string): Promise<GraphData> {
 }
 
 export default function GraphPage() {
-  const projectId = 'project_testphp.vulnweb.com'
+  const projectId = 'project_testphp.vulnweb.com_2'
   const [is3D, setIs3D] = useState(true)
   const [showLabels, setShowLabels] = useState(false)
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 })
+  // Hover highlighting state - using refs to avoid re-renders that block zoom/interactions
+  const hoverNodeRef = useRef<GraphNode | null>(null)
+  const highlightNodesRef = useRef<Set<string>>(new Set())
+  const highlightLinksRef = useRef<Set<GraphLink>>(new Set())
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const graph3DRef = useRef<any>(null)
+  // Store glow rings for 3D animation
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const glowRingsRef = useRef<any[]>([])
+  // Animation time ref for 2D glow effect (updated via requestAnimationFrame)
+  const animationTimeRef = useRef<number>(0)
 
   const drawerWidth = 400
 
@@ -131,12 +174,126 @@ export default function GraphPage() {
     return () => clearTimeout(timer)
   }, [data, is3D])
 
+  // Animation loop for 2D graph (pulsing glow effect)
+  // Uses requestAnimationFrame to update animationTimeRef and force canvas redraw
+  useEffect(() => {
+    if (is3D || !data) return
+
+    // Check if there are any high-severity nodes that need animation
+    const hasHighSeverity = data.nodes.some(node => {
+      if (node.type === 'Vulnerability' || node.type === 'CVE') {
+        const severity = (node.properties?.severity as string)?.toLowerCase()
+        return severity === 'critical' || severity === 'high'
+      }
+      return false
+    })
+
+    if (!hasHighSeverity) return
+
+    let animationId: number
+
+    const animate = () => {
+      // Update animation time for glow effect
+      animationTimeRef.current = Date.now() / 1000
+
+      const fg = graphRef.current
+      if (fg) {
+        // Force a complete redraw by calling _rerender (internal method)
+        // This is more reliable than refresh() during user interactions
+        if (typeof fg._rerender === 'function') {
+          fg._rerender()
+        } else if (typeof fg.refresh === 'function') {
+          fg.refresh()
+        }
+      }
+      animationId = requestAnimationFrame(animate)
+    }
+
+    animationId = requestAnimationFrame(animate)
+    return () => cancelAnimationFrame(animationId)
+  }, [data, is3D])
+
+  // Clear glow rings when switching views or data changes
+  useEffect(() => {
+    glowRingsRef.current = []
+  }, [data, is3D])
+
+  // Animation loop for 3D graph (pulsing glow rings)
+  useEffect(() => {
+    if (!is3D || !data) return
+
+    // Check if there are any high-severity nodes that need animation
+    const hasHighSeverity = data.nodes.some(node => {
+      if (node.type === 'Vulnerability' || node.type === 'CVE') {
+        const severity = (node.properties?.severity as string)?.toLowerCase()
+        return severity === 'critical' || severity === 'high'
+      }
+      return false
+    })
+
+    if (!hasHighSeverity) return
+
+    let animationId: number
+    const animate = () => {
+      const time = Date.now() / 1000
+
+      // Animate all stored glow rings
+      glowRingsRef.current.forEach(ring => {
+        if (ring) {
+          // Critical pulses faster (speed 10) than high (speed 3)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const glowLevel = (ring as any).__glowLevel || 'high'
+          const speed = glowLevel === 'critical' ? 10 : 3
+          const pulse = Math.sin(time * speed) * 0.15 + 1 // 0.85 to 1.15 scale
+          const opacity = Math.sin(time * speed) * 0.2 + 0.4 // 0.2 to 0.6 opacity
+
+          ring.scale.set(pulse, pulse, 1)
+          if (ring.material) {
+            ring.material.opacity = opacity
+          }
+        }
+      })
+
+      animationId = requestAnimationFrame(animate)
+    }
+
+    animationId = requestAnimationFrame(animate)
+    return () => cancelAnimationFrame(animationId)
+  }, [data, is3D])
+
   const getNodeColor = useCallback((node: GraphNode) => {
+    // Use severity-based colors for Vulnerability and CVE nodes
+    if (node.type === 'Vulnerability') {
+      const severity = (node.properties?.severity as string)?.toLowerCase() || 'unknown'
+      return SEVERITY_COLORS_VULN[severity] || SEVERITY_COLORS_VULN.unknown
+    }
+    if (node.type === 'CVE') {
+      const severity = (node.properties?.severity as string)?.toLowerCase() || 'unknown'
+      return SEVERITY_COLORS_CVE[severity] || SEVERITY_COLORS_CVE.unknown
+    }
     return NODE_COLORS[node.type] || NODE_COLORS.Default
   }, [])
 
   const getNodeSize = useCallback((node: GraphNode) => {
-    return NODE_SIZES[node.type] || NODE_SIZES.Default
+    const baseSize = NODE_SIZES[node.type] || NODE_SIZES.Default
+    // Apply severity multiplier for Vulnerability and CVE nodes
+    if (node.type === 'Vulnerability' || node.type === 'CVE') {
+      const severity = (node.properties?.severity as string)?.toLowerCase() || 'unknown'
+      const severityMultiplier = SEVERITY_SIZE_MULTIPLIERS[severity] || 1.0
+      return baseSize * severityMultiplier
+    }
+    return baseSize
+  }, [])
+
+  // Check if a node should have glow effect (critical/high severity)
+  // Returns: false, 'high', or 'critical'
+  const getGlowLevel = useCallback((node: GraphNode): false | 'high' | 'critical' => {
+    if (node.type === 'Vulnerability' || node.type === 'CVE') {
+      const severity = (node.properties?.severity as string)?.toLowerCase()
+      if (severity === 'critical') return 'critical'
+      if (severity === 'high') return 'high'
+    }
+    return false
   }, [])
 
   const handleNodeClick = useCallback((node: GraphNode) => {
@@ -148,6 +305,67 @@ export default function GraphPage() {
     setDrawerOpen(false)
     setSelectedNode(null)
   }, [])
+
+  // Handle node hover - highlight connected nodes and links
+  // Uses refs to avoid re-renders that block zoom/pan interactions
+  const handleNodeHover = useCallback((node: GraphNode | null) => {
+    hoverNodeRef.current = node
+
+    if (!node || !data) {
+      highlightNodesRef.current = new Set()
+      highlightLinksRef.current = new Set()
+      return
+    }
+
+    const newHighlightNodes = new Set<string>()
+    const newHighlightLinks = new Set<GraphLink>()
+
+    // Add the hovered node
+    newHighlightNodes.add(node.id)
+
+    // Find all connected links and neighbor nodes
+    data.links.forEach(link => {
+      const sourceId = typeof link.source === 'string' ? link.source : (link.source as GraphNode).id
+      const targetId = typeof link.target === 'string' ? link.target : (link.target as GraphNode).id
+
+      if (sourceId === node.id || targetId === node.id) {
+        newHighlightLinks.add(link)
+
+        // Add neighbor nodes
+        const neighborId = sourceId === node.id ? targetId : sourceId
+        newHighlightNodes.add(neighborId)
+      }
+    })
+
+    highlightNodesRef.current = newHighlightNodes
+    highlightLinksRef.current = newHighlightLinks
+  }, [data])
+
+  // Handle link hover - highlight the link and its source/target nodes
+  const handleLinkHover = useCallback((link: GraphLink | null) => {
+    if (!link || !data) {
+      highlightNodesRef.current = new Set()
+      highlightLinksRef.current = new Set()
+      hoverNodeRef.current = null
+      return
+    }
+
+    const newHighlightNodes = new Set<string>()
+    const newHighlightLinks = new Set<GraphLink>()
+
+    newHighlightLinks.add(link)
+
+    // Add source and target nodes
+    const sourceId = typeof link.source === 'string' ? link.source : (link.source as GraphNode).id
+    const targetId = typeof link.target === 'string' ? link.target : (link.target as GraphNode).id
+
+    newHighlightNodes.add(sourceId)
+    newHighlightNodes.add(targetId)
+
+    highlightNodesRef.current = newHighlightNodes
+    highlightLinksRef.current = newHighlightLinks
+    hoverNodeRef.current = null
+  }, [data])
 
   return (
     <main className={styles.main}>
@@ -222,8 +440,24 @@ export default function GraphPage() {
               nodeLabel={(node) => `${(node as GraphNode).name} (${(node as GraphNode).type})`}
               nodeRelSize={6}
               linkLabel={(link) => (link as GraphLink).type}
-              linkColor={() => '#4b5563'}
-              linkWidth={1}
+              linkColor={(link) => {
+                const graphLink = link as GraphLink
+                return highlightLinksRef.current.has(graphLink) ? '#60a5fa' : '#374151'
+              }}
+              linkDirectionalArrowColor={(link) => {
+                const graphLink = link as GraphLink
+                return highlightLinksRef.current.has(graphLink) ? '#60a5fa' : '#374151'
+              }}
+              linkWidth={(link) => {
+                const graphLink = link as GraphLink
+                return highlightLinksRef.current.has(graphLink) ? 3 : 1
+              }}
+              linkDirectionalParticles={4}
+              linkDirectionalParticleWidth={(link) => {
+                const graphLink = link as GraphLink
+                return highlightLinksRef.current.has(graphLink) ? 4 : 0
+              }}
+              linkDirectionalParticleColor={() => '#60a5fa'}
               linkDirectionalArrowLength={4}
               linkDirectionalArrowRelPos={1}
               backgroundColor="#0a0a0a"
@@ -231,22 +465,73 @@ export default function GraphPage() {
               height={dimensions.height}
               d3AlphaDecay={0.02}
               d3VelocityDecay={0.4}
-              cooldownTime={5000}
+              cooldownTime={Infinity}
+              cooldownTicks={Infinity}
               onNodeClick={(node) => handleNodeClick(node as GraphNode)}
+              onNodeHover={(node) => handleNodeHover(node as GraphNode | null)}
+              onLinkHover={(link) => handleLinkHover(link as GraphLink | null)}
               nodeCanvasObject={(node, ctx, globalScale) => {
                 const graphNode = node as GraphNode & { x: number; y: number }
                 const baseSize = 6
                 const nodeSize = baseSize * getNodeSize(graphNode)
                 const color = getNodeColor(graphNode)
+                const isHighlighted = highlightNodesRef.current.has(graphNode.id) || selectedNode?.id === graphNode.id
+                const isHovered = hoverNodeRef.current?.id === graphNode.id
+                const isSelected = selectedNode?.id === graphNode.id
 
-                // Draw circle
+                // Draw selection marker (outer ring) for selected node
+                if (isSelected) {
+                  ctx.beginPath()
+                  ctx.arc(graphNode.x, graphNode.y, nodeSize + 6, 0, 2 * Math.PI)
+                  ctx.strokeStyle = '#22c55e' // Green for selected
+                  ctx.lineWidth = 3
+                  ctx.stroke()
+                }
+
+                // Draw highlight ring for hovered/connected nodes
+                if (isHighlighted && !isSelected) {
+                  ctx.beginPath()
+                  ctx.arc(graphNode.x, graphNode.y, nodeSize + 4, 0, 2 * Math.PI)
+                  ctx.strokeStyle = isHovered ? '#fbbf24' : '#60a5fa'
+                  ctx.lineWidth = 2
+                  ctx.stroke()
+                }
+
+                // Check if this is a high/critical severity vulnerability or CVE
+                const glowLevel = getGlowLevel(graphNode)
+
+                // Draw pulsing glow effect for high/critical severity
+                if (glowLevel) {
+                  // Use animationTimeRef for consistent animation timing
+                  const time = animationTimeRef.current || Date.now() / 1000
+                  // Critical pulses faster (speed 10) than high (speed 3)
+                  const speed = glowLevel === 'critical' ? 10 : 3
+                  const pulse = Math.sin(time * speed) * 0.5 + 0.5 // 0 to 1 oscillation
+                  const glowRadius = nodeSize + 2 + pulse * 3
+
+                  // Outer glow ring
+                  const gradient = ctx.createRadialGradient(
+                    graphNode.x, graphNode.y, nodeSize,
+                    graphNode.x, graphNode.y, glowRadius
+                  )
+                  gradient.addColorStop(0, color)
+                  gradient.addColorStop(0.5, `${color}88`)
+                  gradient.addColorStop(1, `${color}00`)
+
+                  ctx.beginPath()
+                  ctx.arc(graphNode.x, graphNode.y, glowRadius, 0, 2 * Math.PI)
+                  ctx.fillStyle = gradient
+                  ctx.fill()
+                }
+
+                // Draw main circle
                 ctx.beginPath()
                 ctx.arc(graphNode.x, graphNode.y, nodeSize, 0, 2 * Math.PI)
                 ctx.fillStyle = color
                 ctx.fill()
 
-                // Draw label if enabled
-                if (showLabels && globalScale > 0.4) {
+                // Draw label if enabled or if node is highlighted
+                if ((showLabels && globalScale > 0.4) || isHighlighted) {
                   const label = graphNode.name
                   const fontSize = Math.max(6 / globalScale, 2)
                   ctx.font = `${fontSize}px Sans-Serif`
@@ -268,20 +553,35 @@ export default function GraphPage() {
 
           {data && data.nodes.length > 0 && is3D && (
             <ForceGraph3D
+              ref={graph3DRef}
               graphData={data}
               nodeLabel={(node) => `${(node as GraphNode).name} (${(node as GraphNode).type})`}
               nodeColor={(node) => getNodeColor(node as GraphNode)}
               nodeRelSize={6}
               nodeOpacity={1}
               linkLabel={(link) => (link as GraphLink).type}
-              linkColor={() => '#4b5563'}
-              linkWidth={1}
+              linkColor={(link) => {
+                const graphLink = link as GraphLink
+                return highlightLinksRef.current.has(graphLink) ? '#60a5fa' : '#4b5563'
+              }}
+              linkWidth={(link) => {
+                const graphLink = link as GraphLink
+                return highlightLinksRef.current.has(graphLink) ? 3 : 1
+              }}
+              linkDirectionalParticles={(link) => {
+                const graphLink = link as GraphLink
+                return highlightLinksRef.current.has(graphLink) ? 4 : 0
+              }}
+              linkDirectionalParticleWidth={4}
+              linkDirectionalParticleColor={() => '#60a5fa'}
               linkDirectionalArrowLength={3}
               linkDirectionalArrowRelPos={1}
               backgroundColor="#0a0a0a"
               width={dimensions.width}
               height={dimensions.height}
               onNodeClick={(node) => handleNodeClick(node as GraphNode)}
+              onNodeHover={(node) => handleNodeHover(node as GraphNode | null)}
+              onLinkHover={(link) => handleLinkHover(link as GraphLink | null)}
               nodeThreeObject={(node: object) => {
                 const graphNode = node as GraphNode
                 const THREE = require('three')
@@ -292,17 +592,73 @@ export default function GraphPage() {
                 // Create sphere with size multiplier
                 const baseSize = 5
                 const sphereSize = baseSize * getNodeSize(graphNode)
+                const nodeColor = getNodeColor(graphNode)
+                const isSelected = selectedNode?.id === graphNode.id
+                const isHighlighted = highlightNodesRef.current.has(graphNode.id)
+                const isHovered = hoverNodeRef.current?.id === graphNode.id
+
+                // Add selection marker ring (green) for selected node
+                if (isSelected) {
+                  const selectGeometry = new THREE.RingGeometry(sphereSize * 1.4, sphereSize * 1.6, 32)
+                  const selectMaterial = new THREE.MeshBasicMaterial({
+                    color: '#22c55e',
+                    transparent: true,
+                    opacity: 0.9,
+                    side: THREE.DoubleSide,
+                  })
+                  const selectRing = new THREE.Mesh(selectGeometry, selectMaterial)
+                  selectRing.lookAt(0, 0, 1)
+                  group.add(selectRing)
+                }
+
+                // Add highlight ring for hovered/connected nodes (not selected)
+                if (isHighlighted && !isSelected) {
+                  const highlightGeometry = new THREE.RingGeometry(sphereSize * 1.3, sphereSize * 1.5, 32)
+                  const highlightMaterial = new THREE.MeshBasicMaterial({
+                    color: isHovered ? '#fbbf24' : '#60a5fa',
+                    transparent: true,
+                    opacity: 0.8,
+                    side: THREE.DoubleSide,
+                  })
+                  const highlightRing = new THREE.Mesh(highlightGeometry, highlightMaterial)
+                  highlightRing.lookAt(0, 0, 1)
+                  group.add(highlightRing)
+                }
+
+                // Add outer glow ring for high/critical severity
+                const glowLevel = getGlowLevel(graphNode)
+                if (glowLevel) {
+                  const glowGeometry = new THREE.RingGeometry(sphereSize * 1.15, sphereSize * 1.4, 32)
+                  const glowMaterial = new THREE.MeshBasicMaterial({
+                    color: nodeColor,
+                    transparent: true,
+                    opacity: 0.4,
+                    side: THREE.DoubleSide,
+                  })
+                  const glowRing = new THREE.Mesh(glowGeometry, glowMaterial)
+
+                  // Make the ring always face the camera (billboard effect)
+                  glowRing.lookAt(0, 0, 1)
+
+                  // Store reference for animation with glow level
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  ;(glowRing as any).__glowLevel = glowLevel
+                  glowRingsRef.current.push(glowRing)
+
+                  group.add(glowRing)
+                }
+
                 const geometry = new THREE.SphereGeometry(sphereSize, 16, 16)
                 const material = new THREE.MeshLambertMaterial({
-                  color: getNodeColor(graphNode),
+                  color: nodeColor,
                   transparent: true,
                   opacity: 0.9,
                 })
                 const sphere = new THREE.Mesh(geometry, material)
                 group.add(sphere)
 
-                // Create label if enabled
-                if (showLabels) {
+                // Create label if enabled or if node is highlighted/selected
+                if (showLabels || isHighlighted || isSelected) {
                   const sprite = new SpriteText(graphNode.name)
                   sprite.color = '#ffffff'
                   sprite.textHeight = 3

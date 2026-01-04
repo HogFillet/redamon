@@ -29,12 +29,78 @@ export async function GET(request: NextRequest) {
   const session = getSession()
 
   try {
+    // Query all nodes and relationships connected to the project
+    // Uses UNION to capture:
+    // 1. Direct relationships where source has project_id
+    // 2. Extended paths for CVE/MITRE chain (Technology -> CVE -> MitreData -> Capec)
     const result = await session.run(
       `
+      // Get direct relationships from project nodes
       MATCH (n)-[r]->(m)
-      WHERE n.project_id = $projectId OR m.project_id = $projectId
+      WHERE n.project_id = $projectId
       RETURN n, r, m
-      LIMIT 500
+
+      UNION
+
+      // Get CVE chain: Technology -> CVE -> MitreData -> Capec
+      MATCH (t:Technology {project_id: $projectId})-[r1:HAS_KNOWN_CVE]->(c:CVE)
+      RETURN t as n, r1 as r, c as m
+
+      UNION
+
+      MATCH (t:Technology {project_id: $projectId})-[:HAS_KNOWN_CVE]->(c:CVE)-[r2:HAS_CWE]->(cwe:MitreData)
+      RETURN c as n, r2 as r, cwe as m
+
+      UNION
+
+      MATCH (t:Technology {project_id: $projectId})-[:HAS_KNOWN_CVE]->(c:CVE)-[:HAS_CWE]->(cwe:MitreData)-[r3:HAS_CAPEC]->(cap:Capec)
+      RETURN cwe as n, r3 as r, cap as m
+
+      UNION
+
+      // Get Vulnerability chain: BaseURL -> Vulnerability, Vulnerability -> Endpoint/Parameter
+      MATCH (b:BaseURL {project_id: $projectId})-[r4:HAS_VULNERABILITY]->(v:Vulnerability)
+      RETURN b as n, r4 as r, v as m
+
+      UNION
+
+      MATCH (v:Vulnerability {project_id: $projectId})-[r5]->(target)
+      RETURN v as n, r5 as r, target as m
+
+      UNION
+
+      // Get SecurityCheck Vulnerabilities linked to IPs
+      MATCH (i:IP {project_id: $projectId})-[r6:HAS_VULNERABILITY]->(v:Vulnerability)
+      RETURN i as n, r6 as r, v as m
+
+      UNION
+
+      // Get SecurityCheck Vulnerabilities linked to Subdomains
+      MATCH (s:Subdomain {project_id: $projectId})-[r7:HAS_VULNERABILITY]->(v:Vulnerability)
+      RETURN s as n, r7 as r, v as m
+
+      UNION
+
+      // Get SecurityCheck Vulnerabilities linked to Domain
+      MATCH (d:Domain {project_id: $projectId})-[r8:HAS_VULNERABILITY]->(v:Vulnerability)
+      RETURN d as n, r8 as r, v as m
+
+      UNION
+
+      // Get GVM Vulnerability -> CVE chain (for CVE enrichment from GVM findings)
+      MATCH (v:Vulnerability {project_id: $projectId})-[r9:HAS_CVE]->(c:CVE)
+      RETURN v as n, r9 as r, c as m
+
+      UNION
+
+      // Get CVE -> CWE -> CAPEC chain from GVM-linked CVEs
+      MATCH (v:Vulnerability {project_id: $projectId})-[:HAS_CVE]->(c:CVE)-[r10:HAS_CWE]->(cwe:MitreData)
+      RETURN c as n, r10 as r, cwe as m
+
+      UNION
+
+      MATCH (v:Vulnerability {project_id: $projectId})-[:HAS_CVE]->(c:CVE)-[:HAS_CWE]->(cwe:MitreData)-[r11:HAS_CAPEC]->(cap:Capec)
+      RETURN cwe as n, r11 as r, cap as m
       `,
       { projectId }
     )
