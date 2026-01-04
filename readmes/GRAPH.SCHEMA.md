@@ -289,12 +289,28 @@ These are linked to their parent BaseURL and contain discovered parameters.
 
 ```cypher
 (:Endpoint {
+    // Core properties
     path: "/artists.php",                   // Path without query string
-    method: "GET",                          // HTTP method
+    method: "GET",                          // HTTP method (GET, POST, PUT, DELETE, etc.)
     baseurl: "http://testphp.vulnweb.com",  // Parent base URL
     has_parameters: true,                   // Does this endpoint have parameters?
     full_url: "http://testphp.vulnweb.com/artists.php",  // Full URL without query params
-    source: "katana_crawl"                  // katana_crawl, vuln_scan
+    source: "katana_crawl",                 // katana_crawl, vuln_scan, resource_enum
+    category: "dynamic",                    // dynamic, static, authentication, search, api, other
+    query_param_count: 1,                   // Number of query parameters
+    body_param_count: 0,                    // Number of body parameters
+    path_param_count: 0,                    // Number of path parameters
+    urls_found: 3,                          // Number of URLs pointing to this endpoint
+
+    // Form properties (for POST endpoints discovered via HTML forms)
+    is_form: true,                          // True if this endpoint receives form submissions
+    form_enctype: "application/x-www-form-urlencoded",  // Form encoding type
+    form_found_at_pages: [                  // Pages where this form was discovered
+        "http://testphp.vulnweb.com/login.php",
+        "http://testphp.vulnweb.com/index.php"
+    ],
+    form_input_names: ["username", "password"],  // Input field names from the form
+    form_count: 2                           // Number of pages containing this form
 })
 ```
 
@@ -619,8 +635,9 @@ HTTP response headers (all captured headers).
 // BaseURL has HTTP headers
 (BaseURL)-[:HAS_HEADER]->(Header)
 
-// BaseURL has vulnerability (DAST findings)
-(BaseURL)-[:HAS_VULNERABILITY]->(Vulnerability)
+// Note: DAST vulnerabilities connect via Endpoint (FOUND_AT) and Parameter (AFFECTS_PARAMETER)
+// rather than directly to BaseURL, to avoid redundant connections in the graph.
+// Path: BaseURL -> Endpoint <- Vulnerability -> Parameter
 ```
 
 ---
@@ -712,27 +729,22 @@ HTTP response headers (all captured headers).
                                               │   │ USES_TECHNOLOGY   │
                                         ┌─────▼──┐│     │         ┌───▼───┐
                                         │Endpoint││     │         │Header │
-                                        └──┬─────┘│     │         └───────┘
-                                           │      │     │
+                                        └──┬──┬──┘│     │         └───────┘
+                                           │  │   │     │
                                     HAS_PARAMETER │     │
-                                           │      │     │
-                                     ┌─────▼────┐ │ ┌───▼──────────┐
-                                     │Parameter │ │ │  Technology  │
-                                     └─────┬────┘ │ └───────┬──────┘
-                                           │      │         │
+                                           │  │FOUND_AT │
+                                     ┌─────▼──┼─┐ │ ┌───▼──────────┐
+                                     │Parameter│ │ │  Technology  │
+                                     └─────┬──┼─┘ │ └───────┬──────┘
+                                           │  │   │         │
                                  AFFECTS_PARAMETER│   HAS_KNOWN_CVE
-                                           │      │         │
-                                           │      │  ┌──────▼──────┐
-                                           │      │  │     CVE     │
-                                           │      │  └──────▲──────┘
-                                           │      │         │
-                                           │      │   ASSOCIATED_CVE
-                                           │      │         │
-                                    ┌──────▼──────▼─────────┴──────┐
-                                    │       Vulnerability          │
-                                    │    (DAST findings from       │
-                                    │     vuln_scan/Nuclei)        │
-                                    └──────────────────────────────┘
+                                           │  │   │         │
+                                    ┌──────▼──▼───┤  ┌──────▼──────┐
+                                    │ Vulnerability│  │     CVE     │
+                                    │  (DAST)      │  └──────▲──────┘
+                                    └──────────┬───┘         │
+                                               │       ASSOCIATED_CVE
+                                               └─────────────┘
 ```
 
 ---
@@ -767,7 +779,7 @@ MATCH (d:Domain {user_id: $user_id, project_id: $project_id})
       -[:HAS_PORT]->(:Port)
       -[:RUNS_SERVICE]->(svc:Service)
       -[:SERVES_URL]->(u:BaseURL)
-      -[:HAS_VULNERABILITY]->(v:Vulnerability {severity: "critical"})
+      -[:HAS_ENDPOINT]->(e:Endpoint)<-[:FOUND_AT]-(v:Vulnerability {severity: "critical"})
 RETURN s.name AS host, svc.name AS service, u.url AS url, v.name AS vulnerability, v.matched_at AS proof
 ```
 
@@ -795,7 +807,7 @@ MATCH (d:Domain {user_id: $user_id, project_id: $project_id})
       -[:HAS_PORT]->(port:Port)
       -[:RUNS_SERVICE]->(svc:Service)
       -[:SERVES_URL]->(u:BaseURL)
-      -[:HAS_VULNERABILITY]->(v:Vulnerability)
+      -[:HAS_ENDPOINT]->(e:Endpoint)<-[:FOUND_AT]-(v:Vulnerability)
 WHERE v.category = "sqli"
 MATCH (u)-[:USES_TECHNOLOGY]->(t:Technology)
 WHERE t.name IN ["MySQL", "PostgreSQL", "MSSQL", "Oracle"]
@@ -810,7 +822,7 @@ MATCH (d:Domain {user_id: $user_id, project_id: $project_id})
 OPTIONAL MATCH (s)-[:RESOLVES_TO]->(ip:IP)
 OPTIONAL MATCH (ip)-[:HAS_PORT]->(port:Port)-[:RUNS_SERVICE]->(svc:Service)
 OPTIONAL MATCH (svc)-[:SERVES_URL]->(u:BaseURL)-[:USES_TECHNOLOGY]->(tech:Technology)
-OPTIONAL MATCH (u)-[:HAS_VULNERABILITY]->(vuln:Vulnerability)
+OPTIONAL MATCH (u)-[:HAS_ENDPOINT]->(e:Endpoint)<-[:FOUND_AT]-(vuln:Vulnerability)
 RETURN s, collect(DISTINCT ip) AS ips,
        collect(DISTINCT {port: port.number, service: svc.name}) AS services,
        collect(DISTINCT tech.name) AS technologies,
@@ -824,8 +836,8 @@ MATCH (d:Domain {user_id: $user_id, project_id: $project_id})
       -[:RESOLVES_TO]->(:IP)
       -[:HAS_PORT]->(:Port)
       -[:RUNS_SERVICE]->(:Service)
-      -[:SERVES_URL]->(:URL)
-      -[:HAS_VULNERABILITY]->(v:Vulnerability)
+      -[:SERVES_URL]->(:BaseURL)
+      -[:HAS_ENDPOINT]->(:Endpoint)<-[:FOUND_AT]-(v:Vulnerability)
 RETURN v.category AS category,
        count(v) AS count,
        collect(DISTINCT v.severity) AS severities
@@ -839,8 +851,8 @@ MATCH (d:Domain {user_id: $user_id, project_id: $project_id})
       -[:RESOLVES_TO]->(:IP)
       -[:HAS_PORT]->(:Port)
       -[:RUNS_SERVICE]->(:Service)
-      -[:SERVES_URL]->(:URL)
-      -[:HAS_VULNERABILITY]->(v:Vulnerability)
+      -[:SERVES_URL]->(:BaseURL)
+      -[:HAS_ENDPOINT]->(:Endpoint)<-[:FOUND_AT]-(v:Vulnerability)
 RETURN v.template_id, v.name, v.severity, count(v) AS findings_count
 ORDER BY findings_count DESC
 LIMIT 10
@@ -1149,6 +1161,9 @@ FOR (os:OSFingerprint) ON (os.os_name);
 | `http_probe.wappalyzer.all_technologies.*` | Technology | categories, confidence, versions_found |
 | `vuln_scan.discovered_urls.dast_urls_with_params[]` | Endpoint | path, method, baseurl, has_parameters, source |
 | `vuln_scan.discovered_urls.dast_urls_with_params[]` | Parameter | name, position, endpoint_path, baseurl, sample_value, is_injectable |
+| `resource_enum.by_base_url.<url>.endpoints[]` | Endpoint | path, method, category, query_param_count, body_param_count, path_param_count, urls_found |
+| `resource_enum.by_base_url.<url>.endpoints[].parameters.body[]` | Parameter | name, position='body', type, input_type, required |
+| `resource_enum.forms[]` | Endpoint (update) | is_form, form_enctype, form_found_at_pages, form_input_names, form_count |
 | `vuln_scan.by_target.<host>.findings[]` | Vulnerability | template_id, severity, matched_at, fuzzing_*, raw_request, raw_response, matched_ip, matcher_status, max_requests |
 | `vuln_scan.by_target.<host>.findings[].raw.*` | Vulnerability | curl_command, extracted_results, extractor_name, authors (from raw.info.author) |
 | `technology_cves.by_technology.<tech>.*` | Technology | product, version, cve_count, critical_cve_count, high_cve_count |
@@ -1169,7 +1184,6 @@ FOR (os:OSFingerprint) ON (os.os_name);
 | `http_probe.by_url.<url>.technologies[]` | USES_TECHNOLOGY | BaseURL → Technology |
 | `vuln_scan.discovered_urls.dast_urls_with_params[]` | HAS_ENDPOINT | BaseURL → Endpoint |
 | `vuln_scan.discovered_urls.dast_urls_with_params[]` | HAS_PARAMETER | Endpoint → Parameter |
-| `vuln_scan.by_target.<host>.findings[]` | HAS_VULNERABILITY | BaseURL → Vulnerability |
 | `vuln_scan.by_target.<host>.findings[]` | FOUND_AT | Vulnerability → Endpoint |
 | `vuln_scan.by_target.<host>.findings[].raw.fuzzing_parameter` | AFFECTS_PARAMETER | Vulnerability → Parameter |
 | `technology_cves.by_technology.<tech>.cves[]` | HAS_KNOWN_CVE | Technology → CVE |
@@ -1664,7 +1678,7 @@ ORDER BY v.severity DESC
 ### 2. Compare Nuclei vs GVM Findings
 ```cypher
 MATCH (d:Domain {user_id: $user_id, project_id: $project_id})
-OPTIONAL MATCH (d)-[:HAS_SUBDOMAIN]->()-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:RUNS_SERVICE]->(:Service)-[:SERVES_URL]->()-[:HAS_VULNERABILITY]->(nuclei:Vulnerability)
+OPTIONAL MATCH (d)-[:HAS_SUBDOMAIN]->()-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:RUNS_SERVICE]->(:Service)-[:SERVES_URL]->()-[:HAS_ENDPOINT]->()<-[:FOUND_AT]-(nuclei:Vulnerability)
 OPTIONAL MATCH (d)-[:HAS_GVM_SCAN]->()-[:FOUND_VULNERABILITY]->(gvm:GVMVulnerability)
 RETURN
   count(DISTINCT nuclei) AS nuclei_findings,
@@ -1697,8 +1711,8 @@ ORDER BY count DESC
 ```cypher
 MATCH (d:Domain {user_id: $user_id, project_id: $project_id})
 
-// Nuclei DAST findings
-OPTIONAL MATCH (d)-[:HAS_SUBDOMAIN]->(s)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:RUNS_SERVICE]->(svc:Service)-[:SERVES_URL]->(u)-[:HAS_VULNERABILITY]->(nuclei:Vulnerability)
+// Nuclei DAST findings (via Endpoint)
+OPTIONAL MATCH (d)-[:HAS_SUBDOMAIN]->(s)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:RUNS_SERVICE]->(svc:Service)-[:SERVES_URL]->(u)-[:HAS_ENDPOINT]->(e)<-[:FOUND_AT]-(nuclei:Vulnerability)
 
 // GVM Network findings
 OPTIONAL MATCH (d)-[:HAS_GVM_SCAN]->(scan)-[:FOUND_VULNERABILITY]->(gvm:GVMVulnerability)
@@ -1729,8 +1743,8 @@ RETURN {
   endpoints: size((d)-[:HAS_SUBDOMAIN]->()-[:RESOLVES_TO]->()-[:HAS_PORT]->()-[:RUNS_SERVICE]->()-[:SERVES_URL]->()-[:HAS_ENDPOINT]->()),
   parameters: size((d)-[:HAS_SUBDOMAIN]->()-[:RESOLVES_TO]->()-[:HAS_PORT]->()-[:RUNS_SERVICE]->()-[:SERVES_URL]->()-[:HAS_ENDPOINT]->()-[:HAS_PARAMETER]->()),
 
-  // DAST findings
-  nuclei_vulns: size((d)-[:HAS_SUBDOMAIN]->()-[:RESOLVES_TO]->()-[:HAS_PORT]->()-[:RUNS_SERVICE]->()-[:SERVES_URL]->()-[:HAS_VULNERABILITY]->()),
+  // DAST findings (via Endpoint with FOUND_AT relationship)
+  nuclei_vulns: size((d)-[:HAS_SUBDOMAIN]->()-[:RESOLVES_TO]->()-[:HAS_PORT]->()-[:RUNS_SERVICE]->()-[:SERVES_URL]->()-[:HAS_ENDPOINT]->()<-[:FOUND_AT]-()),
 
   // Network findings
   gvm_vulns: size((d)-[:HAS_GVM_SCAN]->()-[:FOUND_VULNERABILITY]->()),
@@ -1749,7 +1763,7 @@ MATCH (d:Domain {user_id: $user_id, project_id: $project_id})
       -[:HAS_PORT]->(port:Port)
       -[:RUNS_SERVICE]->(svc:Service)
       -[:SERVES_URL]->(u:BaseURL)
-      -[:HAS_VULNERABILITY]->(v:Vulnerability {category: "sqli"})
+      -[:HAS_ENDPOINT]->(e:Endpoint)<-[:FOUND_AT]-(v:Vulnerability {category: "sqli"})
 MATCH (u)-[:USES_TECHNOLOGY]->(db:Technology)
 WHERE db.name IN ["MySQL", "PostgreSQL", "MSSQL", "MariaDB", "Oracle"]
 RETURN s.name AS host,
@@ -1845,8 +1859,8 @@ RETURN gv.host_ip AS host,
 ### 7. Complete Vulnerability Matrix
 ```cypher
 MATCH (d:Domain {user_id: $user_id, project_id: $project_id})
-// Get all vulnerability sources
-OPTIONAL MATCH (d)-[:HAS_SUBDOMAIN]->()-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:RUNS_SERVICE]->(:Service)-[:SERVES_URL]->()-[:HAS_VULNERABILITY]->(nuclei:Vulnerability)
+// Get all vulnerability sources (DAST vulns via Endpoint)
+OPTIONAL MATCH (d)-[:HAS_SUBDOMAIN]->()-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:RUNS_SERVICE]->(:Service)-[:SERVES_URL]->()-[:HAS_ENDPOINT]->()<-[:FOUND_AT]-(nuclei:Vulnerability)
 OPTIONAL MATCH (d)-[:HAS_GVM_SCAN]->()-[:FOUND_VULNERABILITY]->(gvm:GVMVulnerability)
 OPTIONAL MATCH (d)-[:HAS_SUBDOMAIN]->()-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:RUNS_SERVICE]->(:Service)-[:SERVES_URL]->()-[:USES_TECHNOLOGY]->()-[:HAS_KNOWN_CVE]->(tech_cve:CVE)
 RETURN {

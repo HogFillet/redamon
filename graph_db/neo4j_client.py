@@ -1320,16 +1320,11 @@ class Neo4jClient:
                         )
                         stats["vulnerabilities_created"] += 1
 
-                        # Create relationship: BaseURL -[:HAS_VULNERABILITY]-> Vulnerability
-                        session.run(
-                            """
-                            MATCH (bu:BaseURL {url: $baseurl})
-                            MATCH (v:Vulnerability {id: $vuln_id})
-                            MERGE (bu)-[:HAS_VULNERABILITY]->(v)
-                            """,
-                            baseurl=vuln_base_url, vuln_id=vuln_id
-                        )
-                        stats["relationships_created"] += 1
+                        # Note: We don't create BaseURL -[:HAS_VULNERABILITY]-> Vulnerability
+                        # because the vulnerability is connected via:
+                        # BaseURL -> Endpoint <- Vulnerability (FOUND_AT)
+                        # and optionally: Endpoint -> Parameter <- Vulnerability (AFFECTS_PARAMETER)
+                        # This avoids redundant connections in the graph.
 
                         # Create Endpoint node for the vulnerability path if not exists
                         fuzzing_method = raw.get("fuzzing_method", "GET")
@@ -2046,53 +2041,93 @@ class Neo4jClient:
                             stats["parameters_created"] += 1
                             created_parameters.add(param_key)
 
-                            # Create relationship for POST method
-                            session.run(
-                                """
-                                MATCH (e:Endpoint {path: $path, method: 'POST', baseurl: $baseurl})
-                                MATCH (p:Parameter {name: $param_name, position: $position, endpoint_path: $path, baseurl: $baseurl})
-                                MERGE (e)-[:HAS_PARAMETER]->(p)
-                                """,
-                                path=path, baseurl=base_url,
-                                param_name=param_name, position="body"
-                            )
-                            stats["relationships_created"] += 1
+                            # Create relationship for POST method (body params are only relevant for POST)
+                            # First ensure the POST endpoint exists (in case it wasn't in methods list)
+                            if 'POST' in methods:
+                                session.run(
+                                    """
+                                    MATCH (e:Endpoint {path: $path, method: 'POST', baseurl: $baseurl})
+                                    MATCH (p:Parameter {name: $param_name, position: $position, endpoint_path: $path, baseurl: $baseurl})
+                                    MERGE (e)-[:HAS_PARAMETER]->(p)
+                                    """,
+                                    path=path, baseurl=base_url,
+                                    param_name=param_name, position="body"
+                                )
+                                stats["relationships_created"] += 1
 
                     except Exception as e:
                         stats["errors"].append(f"Endpoint {path} processing failed: {e}")
 
-            # Process forms
+            # Process forms - aggregate by endpoint to collect all found_at locations
+            from urllib.parse import urlparse
+            form_data_by_endpoint = {}  # key: (baseurl, path, method) -> {found_at_pages, enctype, input_names}
+
             for form in forms:
                 try:
                     action = form.get("action", "")
-                    method = form.get("method", "POST")
+                    method = form.get("method", "POST").upper()
                     found_at = form.get("found_at", "")
 
                     if not action:
                         continue
 
                     # Parse action URL
-                    from urllib.parse import urlparse
                     parsed = urlparse(action)
                     path = parsed.path or "/"
+                    baseurl = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else ""
 
-                    # Create Form node (as a special type of endpoint marker)
+                    if not baseurl and found_at:
+                        # Extract baseurl from found_at
+                        found_parsed = urlparse(found_at)
+                        baseurl = f"{found_parsed.scheme}://{found_parsed.netloc}"
+
+                    endpoint_key = (baseurl, path, method)
+
+                    if endpoint_key not in form_data_by_endpoint:
+                        form_data_by_endpoint[endpoint_key] = {
+                            "found_at_pages": set(),
+                            "enctype": form.get("enctype", "application/x-www-form-urlencoded"),
+                            "input_names": set(),
+                            "input_types": {}  # name -> type mapping
+                        }
+
+                    # Collect found_at page
+                    if found_at:
+                        form_data_by_endpoint[endpoint_key]["found_at_pages"].add(found_at)
+
+                    # Collect input names and types
+                    for inp in form.get("inputs", []):
+                        inp_name = inp.get("name", "")
+                        inp_type = inp.get("type", "text")
+                        if inp_name and inp_type != "submit":  # Skip submit buttons
+                            form_data_by_endpoint[endpoint_key]["input_names"].add(inp_name)
+                            form_data_by_endpoint[endpoint_key]["input_types"][inp_name] = inp_type
+
+                except Exception as e:
+                    stats["errors"].append(f"Form data collection failed: {e}")
+
+            # Now update endpoints with aggregated form data
+            for (baseurl, path, method), form_info in form_data_by_endpoint.items():
+                try:
                     session.run(
                         """
                         MATCH (e:Endpoint {path: $path, method: $method, baseurl: $baseurl})
                         SET e.is_form = true,
-                            e.form_found_at = $found_at,
-                            e.form_enctype = $enctype
+                            e.form_enctype = $enctype,
+                            e.form_found_at_pages = $found_at_pages,
+                            e.form_input_names = $input_names,
+                            e.form_count = $form_count
                         """,
-                        path=path, method=method,
-                        baseurl=f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else found_at.rsplit('/', 1)[0],
-                        found_at=found_at,
-                        enctype=form.get("enctype", "application/x-www-form-urlencoded")
+                        path=path, method=method, baseurl=baseurl,
+                        enctype=form_info["enctype"],
+                        found_at_pages=list(form_info["found_at_pages"]),
+                        input_names=list(form_info["input_names"]),
+                        form_count=len(form_info["found_at_pages"])
                     )
                     stats["forms_created"] += 1
 
                 except Exception as e:
-                    stats["errors"].append(f"Form processing failed: {e}")
+                    stats["errors"].append(f"Form endpoint update failed: {e}")
 
             # Update Domain node with resource_enum metadata
             metadata = recon_data.get("metadata", {})

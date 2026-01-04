@@ -58,12 +58,9 @@ export async function GET(request: NextRequest) {
 
       UNION
 
-      // Get Vulnerability chain: BaseURL -> Vulnerability, Vulnerability -> Endpoint/Parameter
-      MATCH (b:BaseURL {project_id: $projectId})-[r4:HAS_VULNERABILITY]->(v:Vulnerability)
-      RETURN b as n, r4 as r, v as m
-
-      UNION
-
+      // Get Vulnerability relationships (FOUND_AT -> Endpoint, AFFECTS_PARAMETER -> Parameter)
+      // Note: We don't query BaseURL -> Vulnerability as that's redundant
+      // Vulnerabilities connect to Endpoints/Parameters which are already under BaseURL
       MATCH (v:Vulnerability {project_id: $projectId})-[r5]->(target)
       RETURN v as n, r5 as r, target as m
 
