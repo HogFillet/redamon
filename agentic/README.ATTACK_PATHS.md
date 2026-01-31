@@ -1181,22 +1181,24 @@ Some attack paths naturally chain into others:
 
 ## Implementation Roadmap
 
-### Phase 1: Intent Router (Minimal)
-- [ ] Add intent detection keywords to `_infer_required_phase()`
-- [ ] Expand beyond just "exploitation keywords" to include brute force, DoS, etc.
-- [ ] Route different intents to appropriate prompts
+### Phase 1: Intent Router (COMPLETED)
+- [x] LLM-based intent classification via `_classify_attack_path()` in `orchestrator.py`
+- [x] `ATTACK_PATH_CLASSIFICATION_PROMPT` in `prompts/classification.py`
+- [x] `AttackPathClassification` Pydantic model in `state.py`
+- [x] Returns both `attack_path_type` and `required_phase`
+- [x] Retry logic with exponential backoff for resilience
 
-### Phase 2: Chain-Specific Workflows
-- [ ] Create `BRUTE_FORCE_TOOLS` prompt (similar to `EXPLOITATION_TOOLS`)
+### Phase 2: Chain-Specific Workflows (COMPLETED for brute_force_credential_guess)
+- [x] Created `BRUTE_FORCE_CREDENTIAL_GUESS_TOOLS` prompt (`prompts/brute_force_credential_guess_prompts.py`)
 - [ ] Create `DOS_TOOLS` prompt
 - [ ] Create `CAPTURE_TOOLS` prompt
 - [ ] Create `SOCIAL_ENGINEERING_TOOLS` prompt
-- [ ] Update `get_phase_tools()` to select based on detected chain
+- [x] Updated `get_phase_tools()` to route based on `attack_path_type`
 
-### Phase 3: Dynamic Post-Exploitation Handling
-- [ ] Add chain type to state (`attack_chain_type`)
-- [ ] Modify post-exploitation transition logic based on chain type
-- [ ] Handle chains that don't have post-exploitation (DoS, Fuzzing)
+### Phase 3: Dynamic Post-Exploitation Handling (COMPLETED)
+- [x] Added `attack_path_type` to state (`AgentState`)
+- [x] Created `POST_EXPLOITATION_TOOLS_SHELL` for SSH brute force sessions
+- [x] Handle chains that don't have post-exploitation (DoS, Fuzzing) - TBD
 
 ### Phase 4: Attack Path Chaining
 - [ ] Detect when one attack path should chain to another

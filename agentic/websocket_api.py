@@ -246,11 +246,12 @@ class StreamingCallback:
             "recommended_next_steps": recommended_next_steps or [],
         })
 
-    async def on_phase_update(self, current_phase: str, iteration_count: int):
+    async def on_phase_update(self, current_phase: str, iteration_count: int, attack_path_type: str = "cve_exploit"):
         """Called when phase changes"""
         await self.connection.send_message(MessageType.PHASE_UPDATE, {
             "current_phase": current_phase,
-            "iteration_count": iteration_count
+            "iteration_count": iteration_count,
+            "attack_path_type": attack_path_type
         })
 
     async def on_todo_update(self, todo_list: list):

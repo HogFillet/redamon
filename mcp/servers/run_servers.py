@@ -19,6 +19,31 @@ import logging
 from multiprocessing import Process
 from typing import List
 
+# =============================================================================
+# METASPLOIT TIMING CONFIGURATION
+# =============================================================================
+# Timing for different Metasploit command types (timeout, quiet_period) in seconds
+#
+# - timeout: Maximum total wait time before giving up
+# - quiet_period: Time of silence (no output) before assuming command completed
+#
+# When command runs, output comes periodically. The quiet_period timer resets
+# on each output line. When no output for quiet_period seconds, we return.
+
+# Brute force attacks (run command) - SSH login attempts have long pauses
+MSF_RUN_TIMEOUT = 1200      # 20 minutes total timeout
+MSF_RUN_QUIET_PERIOD = 300  # 5 minutes quiet period
+
+# CVE exploits (exploit command) - staged payloads may have delays
+MSF_EXPLOIT_TIMEOUT = 600   # 10 minutes total timeout
+MSF_EXPLOIT_QUIET_PERIOD = 180  # 3 minutes quiet period
+
+# Other commands (search, sessions, show, info, etc.)
+MSF_DEFAULT_TIMEOUT = 120   # 2 minutes total timeout
+MSF_DEFAULT_QUIET_PERIOD = 3  # 3 seconds quiet period
+
+# =============================================================================
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -60,6 +85,15 @@ def run_server(name: str, config: dict, transport: str = "sse"):
     # Set environment variables for the server
     os.environ["MCP_TRANSPORT"] = transport
     os.environ[f"{name.upper()}_PORT"] = str(config["port"])
+
+    # Set Metasploit timing configuration
+    if name == "metasploit":
+        os.environ["MSF_RUN_TIMEOUT"] = str(MSF_RUN_TIMEOUT)
+        os.environ["MSF_RUN_QUIET_PERIOD"] = str(MSF_RUN_QUIET_PERIOD)
+        os.environ["MSF_EXPLOIT_TIMEOUT"] = str(MSF_EXPLOIT_TIMEOUT)
+        os.environ["MSF_EXPLOIT_QUIET_PERIOD"] = str(MSF_EXPLOIT_QUIET_PERIOD)
+        os.environ["MSF_DEFAULT_TIMEOUT"] = str(MSF_DEFAULT_TIMEOUT)
+        os.environ["MSF_DEFAULT_QUIET_PERIOD"] = str(MSF_DEFAULT_QUIET_PERIOD)
 
     try:
         # Import and run the server module

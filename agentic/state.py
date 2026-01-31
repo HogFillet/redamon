@@ -31,6 +31,12 @@ Priority = Literal["high", "medium", "low"]
 ApprovalDecision = Literal["approve", "modify", "abort"]
 QuestionFormat = Literal["text", "single_choice", "multi_choice"]
 
+# Attack path types for dynamic routing
+AttackPathType = Literal[
+    "cve_exploit",                  # CVE-based exploitation (default)
+    "brute_force_credential_guess", # Brute force / credential attacks
+]
+
 
 # =============================================================================
 # PYDANTIC MODELS FOR STRUCTURED DATA
@@ -262,6 +268,33 @@ class OutputAnalysis(BaseModel):
     recommended_next_steps: List[str] = Field(default_factory=list)
 
 
+class AttackPathClassification(BaseModel):
+    """
+    LLM classification of attack path type and required phase from user objective.
+
+    Uses structured output for reliable parsing and Pydantic validation.
+    Determines BOTH the phase (informational/exploitation) AND the attack path type.
+    """
+    required_phase: Phase = Field(
+        default="informational",
+        description="Required phase for this request: 'informational' for recon, 'exploitation' for attacks"
+    )
+    attack_path_type: AttackPathType = Field(
+        description="The classified attack path type based on user intent (only used for exploitation phase)"
+    )
+    confidence: float = Field(
+        ge=0.0, le=1.0,
+        description="Confidence score for the classification (0.0-1.0)"
+    )
+    reasoning: str = Field(
+        description="Brief explanation of the classification"
+    )
+    detected_service: Optional[str] = Field(
+        default=None,
+        description="Specific service detected (ssh, mysql, etc.) for brute_force_credential_guess paths"
+    )
+
+
 # =============================================================================
 # LANGGRAPH STATE
 # =============================================================================
@@ -286,6 +319,9 @@ class AgentState(TypedDict):
     current_phase: Phase
     phase_history: List[dict]  # List of PhaseHistoryEntry.model_dump()
     phase_transition_pending: Optional[dict]  # PhaseTransitionRequest.model_dump() or None
+
+    # Attack path routing
+    attack_path_type: str  # AttackPathType: "cve_exploit" or "brute_force_credential_guess"
 
     # Execution trace (Thought-Tool-Output history)
     execution_trace: List[dict]  # List of ExecutionStep.model_dump()
@@ -402,6 +438,7 @@ def create_initial_state(
         "current_phase": "informational",
         "phase_history": [PhaseHistoryEntry(phase="informational").model_dump()],
         "phase_transition_pending": None,
+        "attack_path_type": "cve_exploit",  # Default, will be classified when entering exploitation
         "execution_trace": [],
         "todo_list": [],
         # Multi-objective support

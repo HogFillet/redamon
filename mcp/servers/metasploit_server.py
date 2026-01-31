@@ -30,6 +30,17 @@ SERVER_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("METASPLOIT_PORT", "8003"))
 DEBUG = os.getenv("MSF_DEBUG", "false").lower() == "true"
 
+# Timing configuration (set by run_servers.py or use defaults)
+# Brute force (run command): 20 min timeout, 5 min quiet
+MSF_RUN_TIMEOUT = int(os.getenv("MSF_RUN_TIMEOUT", "1200"))
+MSF_RUN_QUIET_PERIOD = float(os.getenv("MSF_RUN_QUIET_PERIOD", "300"))
+# CVE exploits (exploit command): 10 min timeout, 3 min quiet
+MSF_EXPLOIT_TIMEOUT = int(os.getenv("MSF_EXPLOIT_TIMEOUT", "600"))
+MSF_EXPLOIT_QUIET_PERIOD = float(os.getenv("MSF_EXPLOIT_QUIET_PERIOD", "180"))
+# Other commands: 2 min timeout, 3s quiet
+MSF_DEFAULT_TIMEOUT = int(os.getenv("MSF_DEFAULT_TIMEOUT", "120"))
+MSF_DEFAULT_QUIET_PERIOD = float(os.getenv("MSF_DEFAULT_QUIET_PERIOD", "3"))
+
 mcp = FastMCP(SERVER_NAME)
 
 
@@ -230,19 +241,31 @@ def get_msf_console() -> PersistentMsfConsole:
 
 
 def _get_timing_for_command(command: str) -> tuple[float, float]:
-    """Determine timeout and quiet_period based on command type."""
+    """Determine timeout and quiet_period based on command type.
+
+    Different timing for different command types:
+    - run (brute force): 5 min quiet period, 20 min total timeout
+    - exploit (CVE): 3 min quiet period, 10 min total timeout
+
+    Timing is configurable via environment variables (set in run_servers.py).
+    """
     cmd_lower = command.lower()
 
-    if any(x in cmd_lower for x in ['exploit', 'run']):
-        return (300, 30.0)  # Exploits: 5 min timeout, 30s quiet
+    if 'run' in cmd_lower:
+        # Brute force modules (ssh_login, ftp_login, etc.) use 'run' command
+        # Long pauses between SSH login attempts possible
+        return (MSF_RUN_TIMEOUT, MSF_RUN_QUIET_PERIOD)
+    elif 'exploit' in cmd_lower:
+        # CVE exploits - may have staged payloads with delays
+        return (MSF_EXPLOIT_TIMEOUT, MSF_EXPLOIT_QUIET_PERIOD)
     elif 'search' in cmd_lower:
-        return (60, 3.0)
+        return (60, MSF_DEFAULT_QUIET_PERIOD)
     elif 'sessions' in cmd_lower:
         return (60, 5.0)
     elif any(x in cmd_lower for x in ['info', 'show']):
-        return (60, 3.0)
+        return (60, MSF_DEFAULT_QUIET_PERIOD)
     else:
-        return (120, 3.0)
+        return (MSF_DEFAULT_TIMEOUT, MSF_DEFAULT_QUIET_PERIOD)
 
 
 def _clean_ansi_output(text: str) -> str:

@@ -158,7 +158,7 @@ CYPHER_MAX_RETRIES = 3
 # DEBUG SETTINGS
 # =============================================================================
 
-CREATE_GRAPH_IMAGRE_ON_INIT = True
+CREATE_GRAPH_IMAGRE_ON_INIT = False
 
 # =============================================================================
 # LOGGING SETTINGS

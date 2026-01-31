@@ -73,6 +73,23 @@ const PHASE_CONFIG = {
   },
 }
 
+type AttackPathType = 'cve_exploit' | 'brute_force_credential_guess'
+
+const ATTACK_PATH_CONFIG = {
+  cve_exploit: {
+    label: 'CVE Exploit',
+    shortLabel: 'CVE',
+    color: 'var(--status-warning)',
+    bgColor: 'rgba(245, 158, 11, 0.15)',
+  },
+  brute_force_credential_guess: {
+    label: 'Brute Force',
+    shortLabel: 'BRUTE',
+    color: 'var(--accent-secondary, #8b5cf6)',
+    bgColor: 'rgba(139, 92, 246, 0.15)',
+  },
+}
+
 export function AIAssistantDrawer({
   isOpen,
   onClose,
@@ -85,6 +102,7 @@ export function AIAssistantDrawer({
   const [inputValue, setInputValue] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [currentPhase, setCurrentPhase] = useState<Phase>('informational')
+  const [attackPathType, setAttackPathType] = useState<AttackPathType>('cve_exploit')
   const [iterationCount, setIterationCount] = useState(0)
   const [awaitingApproval, setAwaitingApproval] = useState(false)
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequestPayload | null>(null)
@@ -144,6 +162,7 @@ export function AIAssistantDrawer({
   useEffect(() => {
     setChatItems([])
     setCurrentPhase('informational')
+    setAttackPathType('cve_exploit')
     setIterationCount(0)
     setAwaitingApproval(false)
     setApprovalRequest(null)
@@ -253,6 +272,9 @@ export function AIAssistantDrawer({
       case MessageType.PHASE_UPDATE:
         setCurrentPhase(message.payload.current_phase as Phase)
         setIterationCount(message.payload.iteration_count)
+        if (message.payload.attack_path_type) {
+          setAttackPathType(message.payload.attack_path_type as AttackPathType)
+        }
         break
 
       case MessageType.TODO_UPDATE:
@@ -486,6 +508,7 @@ export function AIAssistantDrawer({
   const handleNewChat = () => {
     setChatItems([])
     setCurrentPhase('informational')
+    setAttackPathType('cve_exploit')
     setIterationCount(0)
     setAwaitingApproval(false)
     setApprovalRequest(null)
@@ -666,6 +689,22 @@ export function AIAssistantDrawer({
             {PHASE_CONFIG[currentPhase].label}
           </span>
         </div>
+
+        {/* Attack Path Badge - Show when in exploitation or post_exploitation phase */}
+        {(currentPhase === 'exploitation' || currentPhase === 'post_exploitation') && (
+          <div
+            className={styles.phaseBadge}
+            style={{
+              backgroundColor: ATTACK_PATH_CONFIG[attackPathType].bgColor,
+              borderColor: ATTACK_PATH_CONFIG[attackPathType].color,
+            }}
+          >
+            <span style={{ color: ATTACK_PATH_CONFIG[attackPathType].color }}>
+              {ATTACK_PATH_CONFIG[attackPathType].shortLabel}
+            </span>
+          </div>
+        )}
+
         {iterationCount > 0 && (
           <span className={styles.iterationCount}>Step {iterationCount}</span>
         )}

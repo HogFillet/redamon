@@ -6,27 +6,10 @@ Supports phase tracking, LLM-managed todo lists, and checkpoint-based approval.
 """
 
 import os
-import re
-import json
 import logging
-from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional
 
 from dotenv import load_dotenv
-
-
-class DateTimeEncoder(json.JSONEncoder):
-    """JSON encoder that handles datetime objects."""
-    def default(self, obj):
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        return super().default(obj)
-
-
-def json_dumps_safe(obj, **kwargs):
-    """JSON dumps with datetime support."""
-    return json.dumps(obj, cls=DateTimeEncoder, **kwargs)
-
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -40,9 +23,6 @@ from state import (
     TargetInfo,
     PhaseTransitionRequest,
     PhaseHistoryEntry,
-    LLMDecision,
-    OutputAnalysis,
-    ExtractedTargetInfo,
     UserQuestionRequest,
     UserQuestionAnswer,
     QAHistoryEntry,
@@ -55,13 +35,6 @@ from state import (
     migrate_legacy_objective,
     summarize_trace_for_response,
     utc_now,
-)
-from utils import (
-    create_config,
-    get_config_values,
-    get_identifiers,
-    set_checkpointer,
-    is_session_config_complete,
 )
 from params import (
     OPENAI_MODEL,
@@ -87,6 +60,21 @@ from prompts import (
     USER_QUESTION_MESSAGE,
     FINAL_REPORT_PROMPT,
     get_phase_tools,
+)
+from orchestrator_helpers import (
+    json_dumps_safe,
+    extract_json,
+    parse_llm_decision,
+    parse_analysis_response,
+    classify_attack_path,
+    determine_phase_for_new_objective,
+    update_target_with_detections,
+    save_graph_image,
+    set_checkpointer,
+    create_config,
+    get_config_values,
+    get_identifiers,
+    is_session_config_complete,
 )
 
 checkpointer = MemorySaver()
@@ -136,7 +124,7 @@ class AgentOrchestrator:
         self._initialized = True
 
         if CREATE_GRAPH_IMAGRE_ON_INIT:
-            self._save_graph_image()
+            save_graph_image(self.graph)
 
         logger.info("AgentOrchestrator initialized with ReAct pattern")
 
@@ -258,88 +246,6 @@ class AgentOrchestrator:
         self.graph = builder.compile(checkpointer=checkpointer)
         logger.info("ReAct LangGraph compiled with checkpointer")
 
-    def _save_graph_image(self) -> None:
-        """Save the LangGraph structure as a PNG image."""
-        try:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            image_path = os.path.join(current_dir, "graph_structure.png")
-            png_data = self.graph.get_graph().draw_mermaid_png()
-
-            with open(image_path, "wb") as f:
-                f.write(png_data)
-
-            logger.info(f"Graph structure image saved to {image_path}")
-        except Exception as e:
-            logger.warning(f"Could not save graph image: {e}")
-
-    # =========================================================================
-    # HELPER METHODS FOR MULTI-OBJECTIVE SUPPORT
-    # =========================================================================
-
-    def _infer_required_phase(self, objective: str) -> str:
-        """
-        Infer which phase this objective likely needs based on keywords.
-
-        Returns:
-            "informational", "exploitation", or "post_exploitation"
-        """
-        objective_lower = objective.lower()
-
-        # Exploitation keywords
-        exploitation_keywords = ["exploit", "hack", "cve", "metasploit", "pwn", "attack", "vulnerability"]
-        if any(kw in objective_lower for kw in exploitation_keywords):
-            return "exploitation"
-
-        # Post-exploitation keywords
-        post_expl_keywords = ["session", "shell", "dump", "privilege", "lateral", "persist", "extract"]
-        if any(kw in objective_lower for kw in post_expl_keywords):
-            return "post_exploitation"
-
-        # Default to informational (reconnaissance, analysis, reporting)
-        return "informational"
-
-    def _determine_phase_for_new_objective(
-        self,
-        objective: str,
-        current_phase: str,
-        objective_history: list
-    ) -> str:
-        """
-        Determine appropriate phase for new objective.
-
-        Per user preference:
-        - Auto-downgrade to informational (no approval needed)
-        - Require approval for exploitation/post-exploitation upgrades
-
-        Args:
-            objective: The new objective content
-            current_phase: The current phase before this objective
-            objective_history: List of completed objectives
-
-        Returns:
-            The phase to transition to for this objective
-        """
-        # Infer required phase from objective content
-        required_phase = self._infer_required_phase(objective)
-
-        # SAFE AUTO-TRANSITION: Downgrade to informational without approval
-        if required_phase == "informational" and current_phase in ["exploitation", "post_exploitation"]:
-            logger.info(f"Auto-downgrading phase to informational for new objective (no approval needed)")
-            return "informational"
-
-        # Keep current phase if already there (avoid redundant transitions)
-        if required_phase == current_phase:
-            logger.info(f"Staying in {current_phase} phase for new objective")
-            return current_phase
-
-        # For exploitation/post-exploitation: stay in informational and let agent request with approval
-        if required_phase in ["exploitation", "post_exploitation"]:
-            logger.info(f"New objective needs {required_phase}, starting in informational (agent will request transition)")
-            return "informational"
-
-        # Default to informational (safest)
-        return "informational"
-
     # =========================================================================
     # LANGGRAPH NODES
     # =========================================================================
@@ -431,10 +337,14 @@ class AgentOrchestrator:
                 else:
                     objective_history = state.get("objective_history", [])
 
+                # Classify attack path and required phase using LLM
+                attack_path, required_phase = await classify_attack_path(self.llm, latest_message)
+                logger.info(f"[{user_id}/{project_id}/{session_id}] Attack path classified: {attack_path}, required_phase: {required_phase}")
+
                 # Create new objective from latest message
                 new_objective = ConversationObjective(
                     content=latest_message,
-                    required_phase=self._infer_required_phase(latest_message)
+                    required_phase=required_phase
                 ).model_dump()
 
                 objectives = objectives + [new_objective]
@@ -446,10 +356,9 @@ class AgentOrchestrator:
                 task_complete = False
 
                 # Determine if phase should auto-transition
-                new_phase = self._determine_phase_for_new_objective(
-                    latest_message,
+                new_phase = determine_phase_for_new_objective(
+                    required_phase,
                     state.get("current_phase"),
-                    objective_history
                 )
 
                 # CRITICAL: Preserve ALL context (user preference)
@@ -459,11 +368,12 @@ class AgentOrchestrator:
                     "objective_history": objective_history,
                     "task_complete": task_complete,
                     "current_phase": new_phase,
+                    "attack_path_type": attack_path,
                     "completion_reason": None,
-                    # Preserve all context
+                    # Preserve context except TODO list (new objective = fresh TODO list)
                     "execution_trace": state.get("execution_trace", []),
                     "target_info": state.get("target_info", {}),
-                    "todo_list": state.get("todo_list", []),
+                    "todo_list": [],  # Clear TODO list for new objective
                     "phase_history": state.get("phase_history", []),
                     "user_id": user_id,
                     "project_id": project_id,
@@ -480,6 +390,7 @@ class AgentOrchestrator:
             "max_iterations": state.get("max_iterations", MAX_ITERATIONS),
             "task_complete": False,
             "current_phase": state.get("current_phase", "informational"),
+            "attack_path_type": state.get("attack_path_type", "cve_exploit"),
             "phase_history": state.get("phase_history", [
                 PhaseHistoryEntry(phase="informational").model_dump()
             ]),
@@ -541,11 +452,13 @@ class AgentOrchestrator:
         qa_history_formatted = format_qa_history(state.get("qa_history", []))
         objective_history_formatted = format_objective_history(state.get("objective_history", []))
 
-        # Get phase tools
-        available_tools = get_phase_tools(phase, ACTIVATE_POST_EXPL_PHASE, POST_EXPL_PHASE_TYPE)
+        # Get phase tools with attack path type for dynamic routing
+        attack_path_type = state.get("attack_path_type", "cve_exploit")
+        available_tools = get_phase_tools(phase, ACTIVATE_POST_EXPL_PHASE, POST_EXPL_PHASE_TYPE, attack_path_type)
 
         system_prompt = REACT_SYSTEM_PROMPT.format(
             current_phase=phase,
+            attack_path_type=attack_path_type,
             available_tools=available_tools,
             iteration=iteration,
             max_iterations=state.get("max_iterations", MAX_ITERATIONS),
@@ -590,7 +503,7 @@ class AgentOrchestrator:
         logger.info(f"{'='*60}\n")
 
         # Parse the JSON response into Pydantic model
-        decision = self._parse_llm_decision(response_text)
+        decision = parse_llm_decision(response_text)
 
         logger.info(f"[{user_id}/{project_id}/{session_id}] Decision: action={decision.action}, tool={decision.tool_name}")
 
@@ -691,45 +604,23 @@ class AgentOrchestrator:
             # Ignore transition to same phase - just continue
             if to_phase == phase:
                 logger.warning(f"[{user_id}/{project_id}/{session_id}] Ignoring transition to same phase: {phase}")
-                # If in exploitation phase with no tool, default to metasploit search
-                if phase == "exploitation" and not decision.tool_name:
-                    logger.info(f"[{user_id}/{project_id}/{session_id}] Forcing metasploit_console usage in exploitation phase")
-                    updates["_decision"]["action"] = "use_tool"
-                    updates["_decision"]["tool_name"] = "metasploit_console"
-                    # Try to extract CVE from objective for search command
-                    objective = state.get("original_objective", "")
-                    cve_pattern = r'CVE-\d{4}-\d+'
-                    cve_matches = re.findall(cve_pattern, objective, re.IGNORECASE)
-                    if cve_matches:
-                        updates["_decision"]["tool_args"] = {"command": f"search {cve_matches[0]}"}
-                    else:
-                        updates["_decision"]["tool_args"] = {"command": "search type:exploit"}
-                elif decision.tool_name:
+                # If agent specified a tool, use it; otherwise loop back to think
+                if decision.tool_name:
                     updates["_decision"]["action"] = "use_tool"
                 else:
-                    # Loop back for another think iteration
-                    logger.info(f"[{user_id}/{project_id}/{session_id}] Looping back to think")
+                    # Let the LLM figure out what to do next
+                    logger.info(f"[{user_id}/{project_id}/{session_id}] No tool specified, looping back to think")
                 return updates
 
             # Also ignore if we JUST transitioned to this phase (prevents immediate re-request)
             if just_transitioned and to_phase == just_transitioned:
                 logger.warning(f"[{user_id}/{project_id}/{session_id}] Ignoring re-request for recent transition to: {to_phase}")
-                # If in exploitation phase with no tool, default to metasploit search
-                if phase == "exploitation" and not decision.tool_name:
-                    logger.info(f"[{user_id}/{project_id}/{session_id}] Forcing metasploit_console usage after transition")
-                    updates["_decision"]["action"] = "use_tool"
-                    updates["_decision"]["tool_name"] = "metasploit_console"
-                    objective = state.get("original_objective", "")
-                    cve_pattern = r'CVE-\d{4}-\d+'
-                    cve_matches = re.findall(cve_pattern, objective, re.IGNORECASE)
-                    if cve_matches:
-                        updates["_decision"]["tool_args"] = {"command": f"search {cve_matches[0]}"}
-                    else:
-                        updates["_decision"]["tool_args"] = {"command": "search type:exploit"}
-                elif decision.tool_name:
+                # If agent specified a tool, use it; otherwise loop back to think
+                if decision.tool_name:
                     updates["_decision"]["action"] = "use_tool"
                 else:
-                    logger.info(f"[{user_id}/{project_id}/{session_id}] Looping back to think")
+                    # Let the LLM figure out what to do next
+                    logger.info(f"[{user_id}/{project_id}/{session_id}] No tool specified, looping back to think")
                 return updates
 
             # AUTO-APPROVE: Downgrade to informational (safe, no approval needed)
@@ -791,9 +682,10 @@ class AgentOrchestrator:
                 logger.warning(f"[{user_id}/{project_id}/{session_id}] ask_user action but no user_question provided")
 
         # Pre-exploitation validation: Force ask_user when session params are missing
-        # This only applies in statefull mode (POST_EXPL_PHASE_TYPE="statefull") when agent tries
-        # to use metasploit_console but LHOST/LPORT/BIND_PORT are not configured
+        # This only applies to CVE exploits in statefull mode that need reverse/bind payloads
+        # Brute force attacks don't need LHOST/LPORT - SSH creates direct shell via CreateSession=true
         if (POST_EXPL_PHASE_TYPE == "statefull" and
+            state.get("attack_path_type") == "cve_exploit" and
             decision.action == "use_tool" and
             decision.tool_name == "metasploit_console" and
             not updates.get("awaiting_user_question")):
@@ -957,7 +849,7 @@ class AgentOrchestrator:
         )
 
         response = await self.llm.ainvoke([HumanMessage(content=analysis_prompt)])
-        analysis = self._parse_analysis_response(response.content)
+        analysis = parse_analysis_response(response.content)
 
         # Update step with analysis and rich data for streaming
         step_data["output_analysis"] = analysis.interpretation
@@ -1021,26 +913,15 @@ class AgentOrchestrator:
         )
         merged_target = current_target.merge_from(new_target)
 
-        # Special handling for statefull exploitation - detect session events
-        if POST_EXPL_PHASE_TYPE == "statefull" and phase == "exploitation":
-            tool_output_lower = tool_output.lower() if tool_output else ""
-
-            # Detect session establishment from output
-            session_match = re.search(
-                r'(?:session|Session)\s+(\d+)\s+opened',
-                tool_output or ""
-            )
-            if session_match:
-                session_id_detected = int(session_match.group(1))
-                if session_id_detected not in merged_target.sessions:
-                    merged_target = merged_target.model_copy(
-                        update={"sessions": merged_target.sessions + [session_id_detected]}
-                    )
-                    logger.info(f"[{user_id}/{project_id}/{session_id}] Detected session {session_id_detected} from exploit output")
-
-            # Detect stage transfer indicator (session may be coming)
-            elif "sending stage" in tool_output_lower:
-                logger.info(f"[{user_id}/{project_id}/{session_id}] Stage transfer detected - agent should use msf_wait_for_session")
+        # Detect sessions and credentials from tool output
+        merged_target = update_target_with_detections(
+            merged_target,
+            tool_output,
+            phase,
+            state.get("attack_path_type", "cve_exploit"),
+            POST_EXPL_PHASE_TYPE,
+            user_id, project_id, session_id
+        )
 
         # Add step to execution trace
         execution_trace = state.get("execution_trace", []) + [step_data]
@@ -1350,109 +1231,6 @@ class AgentOrchestrator:
         return "think"
 
     # =========================================================================
-    # HELPER FUNCTIONS
-    # =========================================================================
-
-    def _extract_json(self, response_text: str) -> Optional[str]:
-        """Extract JSON from LLM response (may be wrapped in markdown)."""
-        json_start = response_text.find("{")
-        json_end = response_text.rfind("}") + 1
-
-        if json_start >= 0 and json_end > json_start:
-            return response_text[json_start:json_end]
-        return None
-
-    def _parse_llm_decision(self, response_text: str) -> LLMDecision:
-        """Parse LLM decision from JSON response using Pydantic validation."""
-        try:
-            json_str = self._extract_json(response_text)
-            if json_str:
-                # Pre-process JSON to handle empty nested objects that would fail validation
-                # LLM sometimes outputs empty objects like user_question: {} or phase_transition: {}
-                data = json.loads(json_str)
-
-                # Remove empty user_question object (would fail validation due to required fields)
-                if "user_question" in data and (not data["user_question"] or data["user_question"] == {}):
-                    data["user_question"] = None
-
-                # Remove empty phase_transition object
-                if "phase_transition" in data and (not data["phase_transition"] or data["phase_transition"] == {}):
-                    data["phase_transition"] = None
-
-                return LLMDecision.model_validate(data)
-        except Exception as e:
-            logger.warning(f"Failed to parse LLM decision: {e}")
-
-        # Fallback - return a completion action with error context
-        return LLMDecision(
-            thought=response_text,
-            reasoning="Failed to parse structured response",
-            action="complete",
-            completion_reason="Unable to continue due to response parsing error",
-            updated_todo_list=[],
-        )
-
-    def _parse_analysis_response(self, response_text: str) -> OutputAnalysis:
-        """Parse analysis response from LLM using Pydantic validation."""
-        try:
-            json_str = self._extract_json(response_text)
-            if json_str:
-                data = json.loads(json_str)
-
-                # Pre-process sessions field to extract integers from strings
-                # LLM sometimes returns session descriptions like "Meterpreter session 1 opened..."
-                if "extracted_info" in data and "sessions" in data["extracted_info"]:
-                    sessions = data["extracted_info"]["sessions"]
-                    parsed_sessions = []
-                    for item in sessions:
-                        if isinstance(item, int):
-                            parsed_sessions.append(item)
-                        elif isinstance(item, str):
-                            # Extract session ID from strings like "Meterpreter session 1 opened..."
-                            match = re.search(r'[Ss]ession\s+(\d+)', item)
-                            if match:
-                                parsed_sessions.append(int(match.group(1)))
-                            else:
-                                try:
-                                    parsed_sessions.append(int(item))
-                                except ValueError:
-                                    pass
-                    data["extracted_info"]["sessions"] = parsed_sessions
-
-                return OutputAnalysis.model_validate(data)
-        except Exception as e:
-            logger.warning(f"Failed to parse analysis response: {e}")
-
-        # Fallback - extract fields from JSON if possible, even when validation fails
-        fallback_interpretation = response_text
-        fallback_findings = []
-        fallback_next_steps = []
-
-        try:
-            json_str = self._extract_json(response_text)
-            if json_str:
-                data = json.loads(json_str)
-                if "interpretation" in data:
-                    fallback_interpretation = data["interpretation"]
-                if "actionable_findings" in data and isinstance(data["actionable_findings"], list):
-                    fallback_findings = data["actionable_findings"]
-                if "recommended_next_steps" in data and isinstance(data["recommended_next_steps"], list):
-                    fallback_next_steps = data["recommended_next_steps"]
-        except Exception:
-            # If JSON extraction also fails, strip markdown code blocks from raw text
-            # Remove ```json ... ``` wrapper
-            fallback_interpretation = re.sub(r'^```(?:json)?\s*', '', fallback_interpretation)
-            fallback_interpretation = re.sub(r'\s*```$', '', fallback_interpretation)
-            fallback_interpretation = fallback_interpretation.strip()
-
-        return OutputAnalysis(
-            interpretation=fallback_interpretation,
-            extracted_info=ExtractedTargetInfo(),
-            actionable_findings=fallback_findings,
-            recommended_next_steps=fallback_next_steps,
-        )
-
-    # =========================================================================
     # PUBLIC API
     # =========================================================================
 
@@ -1599,10 +1377,6 @@ class AgentOrchestrator:
             awaiting_question=state.get("awaiting_user_question", False),
             question_request=state.get("pending_question"),
         )
-
-    # =========================================================================
-    # STREAMING API (WebSocket Support)
-    # =========================================================================
 
     async def invoke_with_streaming(
         self,
@@ -1771,11 +1545,12 @@ class AgentOrchestrator:
     async def _emit_streaming_events(self, state: dict, callback):
         """Emit appropriate streaming events based on state changes."""
         try:
-            # Phase update
+            # Phase update (includes attack_path_type for dynamic routing display)
             if "current_phase" in state:
                 await callback.on_phase_update(
                     state.get("current_phase", "informational"),
-                    state.get("current_iteration", 0)
+                    state.get("current_iteration", 0),
+                    state.get("attack_path_type", "cve_exploit")
                 )
 
             # Todo list update
