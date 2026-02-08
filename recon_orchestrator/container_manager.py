@@ -3,6 +3,7 @@ Docker container lifecycle management for recon processes
 """
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -167,6 +168,11 @@ class ContainerManager:
                     # HOST_RECON_OUTPUT_PATH: Required for nested Docker containers (naabu, httpx, etc.)
                     # These run as sibling containers and need host paths for volume mounts
                     "HOST_RECON_OUTPUT_PATH": f"{recon_path}/output",
+                    # Forward credentials from orchestrator environment
+                    "NVD_API_KEY": os.environ.get("NVD_API_KEY", ""),
+                    "NEO4J_URI": os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
+                    "NEO4J_USER": os.environ.get("NEO4J_USER", "neo4j"),
+                    "NEO4J_PASSWORD": os.environ.get("NEO4J_PASSWORD", ""),
                 },
                 volumes={
                     "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "ro"},

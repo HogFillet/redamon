@@ -20,6 +20,8 @@ COPY . .
 
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
+# Dummy DATABASE_URL for Prisma client generation at build time (not used at runtime)
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/build"
 
 RUN npm ci && npm run build
 

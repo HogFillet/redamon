@@ -1,6 +1,5 @@
-# RedAmon Reconnaissance Module - Docker Compose
-# ===============================================
-# Fully containerized OSINT reconnaissance framework
+# RedAmon Reconnaissance Module - Docker Compose (standalone)
+# For full stack, use the root docker-compose.yml instead.
 #
 # Usage:
 #   docker-compose up --build           # Build and run with default target
@@ -38,9 +37,6 @@ services:
       # Mount local output for easy access from host
       - ./output:/app/recon/output
 
-      # Mount .env file for secrets (GitHub token, API keys)
-      - ./.env:/app/recon/.env:ro
-
     # Environment variables (override params.py settings)
     environment:
       # Target configuration (uncomment and set to override params.py)
@@ -54,11 +50,16 @@ services:
       # Graph DB integration (set to true if Neo4j is running)
       - UPDATE_GRAPH_DB=${UPDATE_GRAPH_DB:-false}
 
+      # Neo4j credentials (for graph DB updates)
+      - NEO4J_URI=bolt://localhost:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-changeme123}
+
       # User/Project tracking
       - USER_ID=${USER_ID:-default_user}
       - PROJECT_ID=${PROJECT_ID:-default_project}
 
-      # API Keys (from .env file)
+      # API Keys (from environment)
       - GITHUB_ACCESS_TOKEN=${GITHUB_ACCESS_TOKEN:-}
       - NVD_API_KEY=${NVD_API_KEY:-}
       - VULNERS_API_KEY=${VULNERS_API_KEY:-}

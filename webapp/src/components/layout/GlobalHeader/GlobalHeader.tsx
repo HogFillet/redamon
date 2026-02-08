@@ -1,6 +1,7 @@
 'use client'
 
-import { Search, Bell, Settings, ChevronDown, Crosshair } from 'lucide-react'
+import Image from 'next/image'
+import { Search, Bell, Settings, ChevronDown } from 'lucide-react'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { ProjectSelector } from './ProjectSelector'
 import styles from './GlobalHeader.module.css'
@@ -9,7 +10,7 @@ export function GlobalHeader() {
   return (
     <header className={styles.header}>
       <div className={styles.logo}>
-        <Crosshair size={18} className={styles.logoSvg} />
+        <Image src="/logo.png" alt="RedAmon" width={28} height={28} className={styles.logoImg} />
         <span className={styles.logoText}>
           <span className={styles.logoAccent}>Red</span>Amon
         </span>

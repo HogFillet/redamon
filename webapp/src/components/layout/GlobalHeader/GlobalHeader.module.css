@@ -15,12 +15,12 @@
   gap: var(--space-1-5);
 }
 
-.logoSvg {
-  color: var(--accent-primary);
+.logoImg {
+  object-fit: contain;
 }
 
 .logoText {
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
   font-weight: var(--font-bold);
   color: var(--text-primary);
 }

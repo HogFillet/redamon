@@ -123,3 +123,6 @@ out/
 # Docker
 *.pid
 docker-compose.override.yml
+
+# Private strategy docs
+LAUNCHPLAN.md
