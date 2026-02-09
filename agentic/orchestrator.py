@@ -95,6 +95,7 @@ class AgentOrchestrator:
         """Initialize the orchestrator with configuration."""
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+        self.venice_api_key = os.getenv("VENICE_API_KEY") 
         self.neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
         self.neo4j_user = os.getenv("NEO4J_USER", "neo4j")
         self.neo4j_password = os.getenv("NEO4J_PASSWORD")
@@ -137,11 +138,26 @@ class AgentOrchestrator:
                 self.neo4j_manager.llm = self.llm
                 logger.info("Updated Neo4j tool LLM")
 
-    def _setup_llm(self) -> None:
-        """Initialize the LLM based on model name (OpenAI or Anthropic)."""
+  def _setup_llm(self) -> None:
+        """Initialize the LLM based on model name (OpenAI, Anthropic, or Venice)."""
         logger.info(f"Setting up LLM: {self.model_name}")
 
-        if self.model_name.startswith("claude-"):
+        if self.venice_api_key and os.getenv("VENICE_BASE_URL"):
+            # Venice AI provider (OpenAI-compatible, proxies Claude/open-source models)
+            self.llm = ChatOpenAI(
+                model=self.model_name,
+                api_key=self.venice_api_key,
+                base_url=os.getenv("VENICE_BASE_URL", "https://api.venice.ai/api/v1"),
+                temperature=0,
+                max_tokens=4096,
+                model_kwargs={
+                    "venice_parameters": {
+                        "include_venice_system_prompt": False
+                    }
+                }
+            )
+            logger.info(f"LLM provider: Venice AI ({self.model_name})")
+        elif self.model_name.startswith("claude-"):
             if not self.anthropic_api_key:
                 raise ValueError(
                     f"ANTHROPIC_API_KEY environment variable is required for model '{self.model_name}'"
@@ -152,6 +168,7 @@ class AgentOrchestrator:
                 temperature=0,
                 max_tokens=4096,
             )
+            logger.info(f"LLM provider: Anthropic")
         else:
             if not self.openai_api_key:
                 raise ValueError(
@@ -162,8 +179,7 @@ class AgentOrchestrator:
                 api_key=self.openai_api_key,
                 temperature=0,
             )
-
-        logger.info(f"LLM provider: {'Anthropic' if self.model_name.startswith('claude-') else 'OpenAI'}")
+            logger.info(f"LLM provider: OpenAI")
 
     async def _setup_tools(self) -> None:
         """Set up all tools (MCP and Neo4j)."""
